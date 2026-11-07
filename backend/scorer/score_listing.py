@@ -15,8 +15,8 @@ only in ``main``.
 import json
 import os
 import sys
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,8 @@ class Deps:
     fetch_geo_spatial: Callable[[str, str], tuple[dict | None, dict | None]]
     fetch_page_fields: Callable[[str], dict]
     load_model: Callable[[str], Any]
+    # Names of the string-valued model inputs; every other input is cast to float64 (see _frame).
+    categorical: Callable[[], list[str]] = field(default_factory=lambda: (lambda: []))
 
 
 def _number(value: Any) -> float | None:
@@ -53,10 +55,24 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-def _slot_result(model: Any, inputs: dict[str, Any]) -> dict[str, Any]:
+def _frame(inputs: dict[str, Any], columns: Sequence[str], categorical: Collection[str]) -> Any:
+    """One-row model input frame, built as batch scoring builds it (``score_frame``).
+
+    Columns in ``columns`` order; non-categorical columns go through ``to_numeric(errors="coerce")`` to float64
+    (the model signature wants doubles, so None, Decimal and bool values become NaN or floats); categorical
+    columns stay as they are.
+    """
     import pandas as pd
 
-    out = model.predict(pd.DataFrame([inputs])).iloc[0]
+    frame = pd.DataFrame([inputs]).reindex(columns=list(columns))
+    for col in columns:
+        if col not in categorical:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float64")
+    return frame.reset_index(drop=True)
+
+
+def _slot_result(model: Any, frame: Any) -> dict[str, Any]:
+    out = model.predict(frame).iloc[0]
     result: dict[str, Any] = {"label": str(out["model_version"])}
     for field in RESULT_FIELDS:
         result[field] = _number(out[field])
@@ -98,12 +114,13 @@ def run(request: dict, deps: Deps) -> dict:
         inputs = row_from_raw(request.get("raw") or {}, geo, spatial, page, columns)
         clean = None
 
+    frame = _frame(inputs, columns, set(deps.categorical()))
     slots: dict[str, Any] = {}
     for name, model_ref in (request.get("slots") or {}).items():
         if model_ref is None:
             continue
         try:
-            slots[name] = _slot_result(deps.load_model(model_ref), inputs)
+            slots[name] = _slot_result(deps.load_model(model_ref), frame)
         except Exception as exc:  # noqa: BLE001 - one failed slot must not stop the other
             slots[name] = {"error": str(exc)}
 
@@ -127,7 +144,6 @@ def _json_default(value: Any) -> Any:
 
 
 def _real_deps() -> Deps:
-    import pandas as pd
     from avm_model import bundle
     from avm_model.loader import load_model
     from avm_model.prototype import data, field_check, page_fields
@@ -174,24 +190,11 @@ def _real_deps() -> Deps:
     def fetch_page_fields(uri: str) -> dict:
         return page_fields.extract(field_check.fetch_page(uri, pages_dir))
 
-    class Pyfunc:
-        """Casts the frame as batch scoring does, then calls the pyfunc's own predict."""
+    models: dict[str, Any] = {}
 
-        def __init__(self, model: Any):
-            self.model = model
-
-        def predict(self, frame: Any) -> Any:
-            frame = frame.reindex(columns=bundle.input_columns())
-            for col in bundle.input_columns():
-                if col not in bundle.categorical_inputs():
-                    frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float64")
-            return self.model.predict(frame.reset_index(drop=True))
-
-    models: dict[str, Pyfunc] = {}
-
-    def cached_model(ref: str) -> Pyfunc:
+    def cached_model(ref: str) -> Any:
         if ref not in models:
-            models[ref] = Pyfunc(load_model(ref))
+            models[ref] = load_model(ref)
         return models[ref]
 
     return Deps(
@@ -200,6 +203,7 @@ def _real_deps() -> Deps:
         fetch_geo_spatial=fetch_geo_spatial,
         fetch_page_fields=fetch_page_fields,
         load_model=cached_model,
+        categorical=bundle.categorical_inputs,
     )
 
 

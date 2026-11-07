@@ -1,6 +1,8 @@
+from decimal import Decimal
+
 import pandas as pd
 
-from scorer.score_listing import Deps, run
+from scorer.score_listing import Deps, _frame, run
 
 COLUMNS = ["property_type", "bedrooms", "pool", "dist_coast_m"]
 KEY = {"source_site_id": "cbjamaica.com", "site_listing_ref": "MLS-1"}
@@ -65,6 +67,7 @@ def make_deps(joined=JOINED, models=None, page=None, page_exc=None):
         fetch_geo_spatial=lambda s, r: (None, None),
         fetch_page_fields=fetch_page_fields,
         load_model=lambda ref: models[ref],
+        categorical=lambda: ["property_type"],
     )
 
 
@@ -150,3 +153,56 @@ def test_clean_block_reports_blocking_flags():
     assert response["clean"]["trainable"] is False
     assert response["clean"]["record_id"] == "r1"
     assert response["clean"]["price_jmd"] == 30_000_000.0
+
+
+def test_frame_is_one_row_in_column_order():
+    frame = _frame({"b": 1, "a": 2, "extra": 3}, ["a", "b", "c"], set())
+    assert list(frame.columns) == ["a", "b", "c"]
+    assert len(frame) == 1
+    assert list(frame.index) == [0]
+
+
+def test_frame_numeric_columns_are_float64():
+    frame = _frame({"n": 3, "x": 1.5}, ["n", "x"], set())
+    assert (frame.dtypes == "float64").all()
+    assert frame["n"].iloc[0] == 3.0
+
+
+def test_frame_decimal_bool_and_none_become_float64():
+    frame = _frame(
+        {"d": Decimal("1.25"), "flag": True, "off": False, "missing": None},
+        ["d", "flag", "off", "missing", "absent"],
+        set(),
+    )
+    assert (frame.dtypes == "float64").all()
+    assert frame["d"].iloc[0] == 1.25
+    assert frame["flag"].iloc[0] == 1.0
+    assert frame["off"].iloc[0] == 0.0
+    assert pd.isna(frame["missing"].iloc[0])
+    assert pd.isna(frame["absent"].iloc[0])
+
+
+def test_frame_categorical_stays_a_string():
+    frame = _frame({"property_type": "apartment", "n": 1}, ["property_type", "n"], {"property_type"})
+    assert frame["property_type"].iloc[0] == "apartment"
+    assert frame["n"].dtype == "float64"
+
+
+def test_frame_unparseable_numeric_string_is_nan():
+    frame = _frame({"n": "not a number", "m": "12.5"}, ["n", "m"], set())
+    assert pd.isna(frame["n"].iloc[0])
+    assert frame["m"].iloc[0] == 12.5
+
+
+def test_run_hands_the_model_the_cast_frame():
+    model = FakeModel(30_000_000.0, "m/1")
+    joined = {**JOINED, "bedrooms": Decimal("2"), "pool": True}
+    deps = make_deps(joined=joined, models={"champion": model})
+    run(request(challenger=None), deps)
+    seen = model.seen
+    assert list(seen.columns) == COLUMNS
+    assert len(seen) == 1
+    assert seen["property_type"].iloc[0] == "apartment"
+    assert seen["bedrooms"].dtype == "float64" and seen["bedrooms"].iloc[0] == 2.0
+    assert seen["pool"].dtype == "float64" and seen["pool"].iloc[0] == 1.0
+    assert seen["dist_coast_m"].dtype == "float64"
