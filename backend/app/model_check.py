@@ -1,0 +1,339 @@
+"""Model estimate for one scraped listing: what the registered listing-price model would say.
+
+Read only. Registry reads go to the MLflow tracking server over HTTP; scoring runs in a subprocess under the
+``ats_avm`` monorepo environment (``scorer/score_listing.py``), because ``avm_model`` pins its own scikit-learn.
+This module runs in the explorer's venv and must not import ``avm_model``, ``mlflow`` or anything from the monorepo.
+
+Env: ``MLFLOW_TRACKING_URI`` (default http://localhost:5000), ``MODEL_CHECK_ATS_AVM_ROOT`` (default: the ``ats_avm``
+checkout that holds this submodule; must contain ``packages/avm_model``), ``MODEL_CHECK_TIMEOUT_S`` (default 180).
+"""
+import datetime as dt
+import json
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
+from pydantic import BaseModel
+
+from . import listings
+from .auth import get_current_user
+from .model_limits import flagged_fields, geo_missing, input_warnings
+
+router = APIRouter(prefix="/api/v1/model-check", tags=["model-check"], dependencies=[Depends(get_current_user)])
+
+MODEL_NAME = "avm_listing_price"
+SLOT_NAMES = ("champion", "challenger")
+SUPPORTED_TYPES = {"house", "apartment", "townhouse"}
+UNSUPPORTED_MESSAGE = "Model estimates cover for-sale houses, apartments and townhouses only"
+PROXY_HINT = "gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000"
+SCORER_PATH = Path(__file__).resolve().parent.parent / "scorer" / "score_listing.py"
+RESULT_FIELDS = (
+    "pred_price_jmd",
+    "lower_90_jmd",
+    "upper_90_jmd",
+    "lower_80_jmd",
+    "upper_80_jmd",
+    "lower_95_jmd",
+    "upper_95_jmd",
+)
+
+
+class ScorerError(Exception):
+    """The scorer subprocess failed or printed something unusable. The message is shown to the user."""
+
+
+# ---------- pure helpers ----------
+
+def is_supported(record: dict) -> tuple[bool, str | None]:
+    """The model covers for-sale houses, apartments and townhouses."""
+    listing_type = record.get("listing_type_raw")
+    property_type = str(record.get("property_type_raw") or "").strip().lower()
+    if listing_type == "For Sale" and property_type in SUPPORTED_TYPES:
+        return True, None
+    return False, (f"{UNSUPPORTED_MESSAGE} (this listing is {listing_type or 'of unknown type'} / "
+                   f"{record.get('property_type_raw') or 'unknown property type'}).")
+
+
+def asking_jmd(amount: float | None, currency: str | None, fx_rate_used: float | None) -> float | None:
+    if amount is None:
+        return None
+    if currency == "JMD":
+        return amount
+    if currency == "USD" and fx_rate_used:
+        return amount * fx_rate_used
+    return None
+
+
+def gap_pct(estimate: float, asking: float | None) -> float | None:
+    """How far the estimate sits from the asking price, in percent of the asking price."""
+    if estimate is None or asking is None or asking <= 0:
+        return None
+    return (estimate / asking - 1) * 100
+
+
+def _no_nan(value: Any) -> Any:
+    """JSON allows no NaN or Infinity; the stdlib parser accepts them, so turn them into null."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _no_nan(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_no_nan(v) for v in value]
+    return value
+
+
+# ---------- registry ----------
+
+def _tracking_uri() -> str:
+    return (os.environ.get("MLFLOW_TRACKING_URI") or "http://localhost:5000").rstrip("/")
+
+
+def _registry_down_message(reason: Any) -> str:
+    return (f"Model registry unreachable at {_tracking_uri()} ({reason}). "
+            f"Open the proxy in another terminal: {PROXY_HINT}")
+
+
+def _iso_from_ms(ms: Any) -> str:
+    try:
+        return dt.datetime.fromtimestamp(int(ms) / 1000, dt.timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def fetch_registry() -> tuple[list[dict], dict[str, str]]:
+    """(versions newest first, alias -> version) of the registered model. Raises on any failure."""
+    base = _tracking_uri() + "/api/2.0/mlflow"
+    versions_resp = httpx.get(f"{base}/model-versions/search",
+                              params={"filter": f"name='{MODEL_NAME}'", "max_results": 200}, timeout=10)
+    versions_resp.raise_for_status()
+    model_resp = httpx.get(f"{base}/registered-models/get", params={"name": MODEL_NAME}, timeout=10)
+    model_resp.raise_for_status()
+    aliases = {a["alias"]: str(a["version"])
+               for a in (model_resp.json().get("registered_model") or {}).get("aliases") or []}
+    versions = []
+    for v in versions_resp.json().get("model_versions") or []:
+        version = str(v["version"])
+        versions.append({
+            "version": version,
+            "aliases": sorted(a for a, ver in aliases.items() if ver == version),
+            "created_at": _iso_from_ms(v.get("creation_timestamp")),
+        })
+    versions.sort(key=lambda v: int(v["version"]), reverse=True)
+    return versions, aliases
+
+
+# ---------- scorer subprocess ----------
+
+def _ats_avm_root() -> Path:
+    env = os.environ.get("MODEL_CHECK_ATS_AVM_ROOT")
+    return Path(env) if env else Path(__file__).resolve().parents[4]
+
+
+def _timeout_s() -> float:
+    try:
+        return float(os.environ.get("MODEL_CHECK_TIMEOUT_S") or 180)
+    except ValueError:
+        return 180.0
+
+
+def _tail(text: str, lines: int = 2, limit: int = 300) -> str:
+    kept = " | ".join(line.strip() for line in (text or "").strip().splitlines()[-lines:] if line.strip())
+    return kept[-limit:]
+
+
+def run_scorer(request: dict) -> dict:
+    """Run the scorer under the monorepo env with ``request`` on stdin and return its parsed response.
+
+    Raises ScorerError for a missing monorepo, a non-zero exit, empty or unparsable output; the caller also handles
+    subprocess.TimeoutExpired and FileNotFoundError (uv not installed).
+    """
+    root = _ats_avm_root()
+    if not (root / "packages" / "avm_model").is_dir():
+        raise ScorerError("ATS AVM monorepo not found; set MODEL_CHECK_ATS_AVM_ROOT")
+    cmd = ["uv", "run", "--project", str(root), "--package", "avm_model", "--extra", "prototype",
+           "python", str(SCORER_PATH)]
+    done = subprocess.run(cmd, input=json.dumps(request), capture_output=True, text=True, encoding="utf-8",
+                          timeout=_timeout_s(), env={**os.environ, "MLFLOW_TRACKING_URI": _tracking_uri()})
+    lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
+    payload = None
+    if lines:
+        try:
+            payload = json.loads(lines[-1])
+        except ValueError:
+            payload = None
+    if isinstance(payload, dict) and "fatal" in payload:
+        raise ScorerError(f"The listing could not be turned into a model input row: {payload['fatal']}")
+    if done.returncode != 0:
+        detail = _tail(done.stderr)
+        raise ScorerError(f"The scorer exited with code {done.returncode}" + (f": {detail}" if detail else ""))
+    if not isinstance(payload, dict):
+        detail = _tail(done.stderr)
+        raise ScorerError("The scorer printed no usable result" + (f": {detail}" if detail else ""))
+    return _no_nan(payload)
+
+
+# ---------- endpoints ----------
+
+class ScoreRequest(BaseModel):
+    record_id: str
+    champion: str = "champion"
+    challenger: Optional[str] = "challenger"
+
+
+@router.get("/versions")
+def versions():
+    try:
+        found, aliases = fetch_registry()
+    except Exception as exc:  # noqa: BLE001 - any registry failure is a 503 with instructions
+        logger.warning("Model registry read failed: {e}", e=exc)
+        raise HTTPException(503, _registry_down_message(exc))
+    return {"model": MODEL_NAME, "versions": found, "aliases": aliases}
+
+
+def _find_record(record_id: str) -> dict:
+    for r in listings._rows():
+        if r["record"]["record_id"] == record_id:
+            return r
+    raise HTTPException(404, "No such listing record")
+
+
+def _resolve(requested: str | None, versions_found: list[dict], aliases: dict[str, str]) -> str | None:
+    """A version number for an alias name or a version number that exists; None otherwise."""
+    if not requested:
+        return None
+    if requested in aliases:
+        return aliases[requested]
+    if requested.isdigit() and any(v["version"] == str(int(requested)) for v in versions_found):
+        return str(int(requested))
+    return None
+
+
+def _slot_out(scored: dict, asking: float | None) -> dict:
+    if scored.get("error") is not None:
+        return {"status": "error", "message": str(scored["error"])}
+    out = {"status": "ok", "label": scored.get("label")}
+    for name in RESULT_FIELDS:
+        out[name] = scored.get(name)
+    out["gap_pct"] = gap_pct(scored.get("pred_price_jmd"), asking)
+    out["floor_area_flagged"] = bool(scored.get("floor_area_flagged"))
+    return out
+
+
+def _warnings(result: dict, record_id: str, inputs: dict, slots: dict) -> list[dict]:
+    out: list[dict] = []
+    clean = result.get("clean")
+    if clean is None:
+        out.append({"code": "not_in_clean_table",
+                    "message": "This listing is not in the clean table; the inputs were built from the raw scrape."})
+    else:
+        if clean.get("record_id") not in (None, record_id):
+            out.append({"code": "observation_differs",
+                        "message": f"The clean table holds a different observation of this listing "
+                                   f"({clean['record_id']}) than the one on screen ({record_id}); "
+                                   f"the estimate uses the inputs of {clean['record_id']}."})
+        if clean.get("trainable") is True:
+            out.append({"code": "probably_in_training",
+                        "message": "This listing is in the clean table and marked trainable, so the model has "
+                                   "probably seen it; this is not an out-of-sample check."})
+        elif clean.get("trainable") is False:
+            flags = ", ".join(clean.get("blocking_flags") or []) or "none recorded"
+            out.append({"code": "blocked_from_training",
+                        "message": f"This listing is in the clean table but excluded from training "
+                                   f"(blocking flags: {flags})."})
+    out += [{"code": w["code"], "message": w["message"]} for w in input_warnings(inputs)]
+    if any(s.get("status") == "ok" and s.get("floor_area_flagged") for s in slots.values()):
+        out.append({"code": "floor_area_ignored",
+                    "message": "The model judged the floor area implausible and ignored it in at least one estimate."})
+    if geo_missing(inputs):
+        out.append({"code": "geo_missing",
+                    "message": "Latitude or longitude is missing, so location features are filled in as unknown."})
+    if result.get("page_error"):
+        out.append({"code": "page_fields_unavailable",
+                    "message": f"Fields read from the listing page were unavailable: {result['page_error']}"})
+    return out
+
+
+def _scorer_failure_message(exc: Exception) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return (f"The scorer did not finish within {_timeout_s():g} s (the first run downloads the model); "
+                "try again.")
+    if isinstance(exc, FileNotFoundError):
+        return "uv was not found on PATH; install uv to run the scorer."
+    return str(exc) or exc.__class__.__name__
+
+
+@router.post("/score")
+def score(body: ScoreRequest):
+    record = _find_record(body.record_id)
+    item = listings._list_item(record)
+    supported, reason = is_supported(item)
+    asking = {"amount": item["amount"], "currency": item["currency"],
+              "jmd": asking_jmd(item["amount"], item["currency"], None)}
+    out: dict[str, Any] = {"supported": supported, "unsupported_reason": reason, "asking": asking,
+                           "input_source": None, "clean": None, "inputs": [], "slots": {},
+                           "warnings": [], "registry_error": None}
+    requested = {"champion": body.champion, "challenger": body.challenger}
+    if not supported:
+        out["slots"] = {name: {"status": "skipped"} for name in SLOT_NAMES}
+        return out
+
+    versions_found: list[dict] = []
+    aliases: dict[str, str] = {}
+    try:
+        versions_found, aliases = fetch_registry()
+    except Exception as exc:  # noqa: BLE001 - recorded; the inputs are still worth showing
+        logger.warning("Model registry read failed: {e}", e=exc)
+        out["registry_error"] = _registry_down_message(exc)
+    resolved = {n: None if out["registry_error"] else _resolve(requested[n], versions_found, aliases)
+                for n in SLOT_NAMES}
+
+    request = {
+        "key": {"source_site_id": listings._g(record, "provenance", "source_site_id"),
+                "site_listing_ref": listings._g(record, "provenance", "site_listing_ref")},
+        "raw": item,
+        "snapshot_uri": listings._g(record, "provenance", "snapshot_uri"),
+        "slots": resolved,
+    }
+    result: dict | None = None
+    failure: str | None = None
+    try:
+        result = run_scorer(request)
+    except (ScorerError, subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError) as exc:
+        failure = _scorer_failure_message(exc)
+        logger.warning("Model-check scorer failed for {r}: {m}", r=body.record_id, m=failure)
+
+    scored_slots = (result or {}).get("slots") or {}
+    clean = (result or {}).get("clean")
+    fx = clean.get("fx_rate_used") if clean else None
+    asking["jmd"] = asking_jmd(item["amount"], item["currency"], fx)
+
+    slots: dict[str, dict] = {}
+    for name in SLOT_NAMES:
+        if requested[name] is None:
+            slots[name] = {"status": "skipped"}
+        elif out["registry_error"]:
+            slots[name] = {"status": "error", "message": out["registry_error"]}
+        elif resolved[name] is None:
+            slots[name] = {"status": "not_registered"}
+        elif failure is not None:
+            slots[name] = {"status": "error", "message": failure}
+        elif name in scored_slots:
+            slots[name] = _slot_out(scored_slots[name], asking["jmd"])
+        else:
+            slots[name] = {"status": "error", "message": "The scorer returned no result for this slot."}
+    out["slots"] = slots
+
+    if result is not None:
+        inputs = result.get("inputs") or {}
+        flags = flagged_fields(inputs)
+        out["input_source"] = result.get("input_source")
+        out["clean"] = clean
+        out["inputs"] = [{"name": k, "value": v, "flag": flags.get(k)} for k, v in inputs.items()]
+        out["warnings"] = _warnings(result, body.record_id, inputs, slots)
+    return out
