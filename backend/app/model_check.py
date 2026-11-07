@@ -32,6 +32,9 @@ SUPPORTED_TYPES = {"house", "apartment", "townhouse"}
 UNSUPPORTED_MESSAGE = "Model estimates cover for-sale houses, apartments and townhouses only"
 PROXY_HINT = "gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000"
 SCORER_PATH = Path(__file__).resolve().parent.parent / "scorer" / "score_listing.py"
+REGISTRY_TIMEOUT_S = 30  # the proxied registry has answered slowly now and then
+# Set by the venv launcher that started this backend; inherited by `uv run`, they break the scorer's own Python.
+SCORER_ENV_DROP = ("PYTHONHOME", "PYTHONPATH", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")
 RESULT_FIELDS = (
     "pred_price_jmd",
     "lower_90_jmd",
@@ -109,9 +112,11 @@ def fetch_registry() -> tuple[list[dict], dict[str, str]]:
     """(versions newest first, alias -> version) of the registered model. Raises on any failure."""
     base = _tracking_uri() + "/api/2.0/mlflow"
     versions_resp = httpx.get(f"{base}/model-versions/search",
-                              params={"filter": f"name='{MODEL_NAME}'", "max_results": 200}, timeout=10)
+                              params={"filter": f"name='{MODEL_NAME}'", "max_results": 200},
+                              timeout=REGISTRY_TIMEOUT_S)
     versions_resp.raise_for_status()
-    model_resp = httpx.get(f"{base}/registered-models/get", params={"name": MODEL_NAME}, timeout=10)
+    model_resp = httpx.get(f"{base}/registered-models/get", params={"name": MODEL_NAME},
+                            timeout=REGISTRY_TIMEOUT_S)
     model_resp.raise_for_status()
     aliases = {a["alias"]: str(a["version"])
                for a in (model_resp.json().get("registered_model") or {}).get("aliases") or []}
@@ -157,8 +162,10 @@ def run_scorer(request: dict) -> dict:
         raise ScorerError("ATS AVM monorepo not found; set MODEL_CHECK_ATS_AVM_ROOT")
     cmd = ["uv", "run", "--project", str(root), "--package", "avm_model", "--extra", "prototype",
            "python", str(SCORER_PATH)]
+    env = {k: v for k, v in os.environ.items() if k not in SCORER_ENV_DROP}
+    env["MLFLOW_TRACKING_URI"] = _tracking_uri()
     done = subprocess.run(cmd, input=json.dumps(request), capture_output=True, text=True, encoding="utf-8",
-                          timeout=_timeout_s(), env={**os.environ, "MLFLOW_TRACKING_URI": _tracking_uri()})
+                          timeout=_timeout_s(), env=env)
     lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
     payload = None
     if lines:

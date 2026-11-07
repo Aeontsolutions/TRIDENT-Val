@@ -307,7 +307,7 @@ def test_fetch_registry_maps_mlflow_payload(monkeypatch):
     calls = []
 
     def fake_get(url, params=None, timeout=None):
-        calls.append((url, params))
+        calls.append((url, params, timeout))
         if url.endswith("/model-versions/search"):
             return FakeResponse(
                 {
@@ -329,6 +329,7 @@ def test_fetch_registry_maps_mlflow_payload(monkeypatch):
     assert [v["version"] for v in versions] == ["10", "2", "1"]
     assert versions[0]["aliases"] == ["challenger"] and versions[2]["aliases"] == ["champion"]
     assert versions[0]["created_at"].startswith("2025-11") or versions[0]["created_at"].startswith("2026-")
+    assert [c[2] for c in calls] == [model_check.REGISTRY_TIMEOUT_S] * 2 and model_check.REGISTRY_TIMEOUT_S == 30
     assert calls[0][0] == "http://reg:5000/api/2.0/mlflow/model-versions/search"
     assert calls[0][1]["filter"] == "name='avm_listing_price'"
     assert calls[1][0] == "http://reg:5000/api/2.0/mlflow/registered-models/get"
@@ -374,6 +375,20 @@ def test_real_runner_command_and_parse(real_runner):
     assert json.loads(kw["input"]) == REQUEST
     assert kw["timeout"] == 180
     assert kw["env"]["MLFLOW_TRACKING_URI"] == "http://reg:5000"
+
+
+def test_real_runner_drops_interpreter_variables_from_child_env(real_runner, monkeypatch):
+    install, _ = real_runner
+    for name in ("PYTHONHOME", "PYTHONPATH", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV"):
+        monkeypatch.setenv(name, "/some/venv")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("SOME_OTHER_VAR", "kept")
+    calls = install(Completed(0, '{"inputs": {}, "slots": {}}'))
+    model_check.run_scorer(REQUEST)
+    env = calls[0][1]["env"]
+    assert not {"PYTHONHOME", "PYTHONPATH", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV"} & set(env)
+    assert env["MLFLOW_TRACKING_URI"] == "http://reg:5000"
+    assert env["PATH"] == "/usr/bin" and env["SOME_OTHER_VAR"] == "kept"
 
 
 @pytest.mark.parametrize(
