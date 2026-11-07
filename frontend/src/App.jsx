@@ -1,14 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
-import About from './views/About.jsx'
-import Dashboard from './views/Dashboard.jsx'
-import PortfolioGrid from './views/PortfolioGrid.jsx'
-import Inspector from './views/Inspector.jsx'
-import MapView from './views/MapView.jsx'
-import ModelCard from './views/ModelCard.jsx'
-import ModelCompare from './views/ModelCompare.jsx'
-import RevaluationCycles from './views/RevaluationCycles.jsx'
-import MyQueue from './views/MyQueue.jsx'
-import ManagerDashboard from './views/ManagerDashboard.jsx'
+import React, { useEffect, useState } from 'react'
 import DataProfile from './views/DataProfile.jsx'
 import ListingsQuality from './views/ListingsQuality.jsx'
 import ListingsGrid from './views/ListingsGrid.jsx'
@@ -21,32 +11,19 @@ import { ListingsShell } from './components/ListingsShell.jsx'
 import Login from './views/Login.jsx'
 import { Spinner } from './components/shared.jsx'
 import { logger } from './logger.js'
-import { createCopilot } from './copilot.js'
 import { api, setUnauthorizedHandler } from './api.js'
 
 const BASE_TABS = [
-  { id: 'about', label: 'About' },
-  { id: 'dashboard', label: 'Risk Overview' },
-  { id: 'portfolio', label: 'Portfolio' },
-  { id: 'map', label: 'Map' },
-  { id: 'revaluations', label: 'Revaluation Cycles' },
-  { id: 'model-card', label: 'Model Card' },
-  { id: 'compare', label: 'Compare' },
   { id: 'listings-quality', label: 'Listings' },
 ]
 
-// Assignable roles (Underwriter, Admin) get "My Queue"; only Admin (the manager role in this
-// PoC's RBAC) gets the manager rollup.
 function tabsForRole(role) {
   const tabs = [...BASE_TABS]
-  if (role === 'Underwriter' || role === 'Admin') tabs.push({ id: 'my-queue', label: 'My Queue' })
-  if (role === 'Admin') tabs.push({ id: 'manager', label: 'Manager' })
   if (role === 'Admin') tabs.push({ id: 'data-profile', label: 'Data Profile' })
   return tabs
 }
 
 const VIEW_IDS = new Set([
-  'about', 'dashboard', 'portfolio', 'map', 'revaluations', 'model-card', 'compare', 'my-queue', 'manager',
   'data-profile', 'listings', 'listings-quality', 'listings-distributions', 'listings-map',
   'listings-runs', 'listings-flags',
 ])
@@ -54,30 +31,22 @@ const VIEW_IDS = new Set([
 const LISTINGS_VIEWS = new Set(['listings-quality', 'listings', 'listings-distributions', 'listings-map',
   'listings-runs', 'listings-flags'])
 
-function stateToPath({ view, pid, gridStatus }) {
+function stateToPath({ view, pid }) {
   if (view === 'listing' && pid != null) return `/listing/${encodeURIComponent(pid)}`
-  if (view === 'inspector' && pid != null) return `/inspector/${encodeURIComponent(pid)}`
-  if (view === 'portfolio' && gridStatus) return `/portfolio?status=${encodeURIComponent(gridStatus)}`
   return `/${view}`
 }
 
 function stateFromLocation() {
   const segments = window.location.pathname.split('/').filter(Boolean)
   const [head, arg] = segments
-  if (head === 'listing' && arg) return { view: 'listing', pid: decodeURIComponent(arg), gridStatus: '' }
-  if (head === 'inspector' && arg) return { view: 'inspector', pid: decodeURIComponent(arg), gridStatus: '' }
-  if (VIEW_IDS.has(head)) {
-    const status = head === 'portfolio' ? new URLSearchParams(window.location.search).get('status') || '' : ''
-    return { view: head, pid: null, gridStatus: status }
-  }
-  return { view: 'about', pid: null, gridStatus: '' }
+  if (head === 'listing' && arg) return { view: 'listing', pid: decodeURIComponent(arg) }
+  if (VIEW_IDS.has(head)) return { view: head, pid: null }
+  return { view: 'listings-quality', pid: null }
 }
 
 export default function App() {
-  const [{ view, pid, gridStatus }, setNavState] = useState(stateFromLocation)
+  const [{ view, pid }, setNavState] = useState(stateFromLocation)
   const [listingFilters, setListingFilters] = useState({})
-  const [copilotOpen, setCopilotOpen] = useState(true)
-  const copilotRef = useRef(null)
   // undefined = checking for an existing session, null = logged out, object = logged in
   const [user, setUser] = useState(undefined)
 
@@ -86,18 +55,16 @@ export default function App() {
     api.me().then(setUser).catch(() => setUser(null))
   }, [])
 
-  // Always land on the About page right after signing in, regardless of whatever
+  // Always land on the Listings overview right after signing in, regardless of whatever
   // path/view was in the URL before login (e.g. a bookmarked deep link).
   const handleLoggedIn = (loggedInUser) => {
     setUser(loggedInUser)
-    navigate({ view: 'about', pid: null, gridStatus: '' }, { replace: true })
+    navigate({ view: 'listings-quality', pid: null }, { replace: true })
   }
 
   const handleLogout = async () => {
     logger.track('auth', `Logged out '${user.username}'.`)
     try { await api.logout() } catch { /* session is being cleared client-side regardless */ }
-    // Flipping `user` to null re-runs the copilot-mount effect below, whose own
-    // cleanup disposes the widget — no need to touch copilotRef/copilotOpen here.
     setUser(null)
   }
 
@@ -107,7 +74,7 @@ export default function App() {
   // StrictMode double-invokes updater functions in dev, which would otherwise
   // push two history entries per navigation.
   const navigate = (next, { replace = false } = {}) => {
-    const merged = { view, pid, gridStatus, ...next }
+    const merged = { view, pid, ...next }
     const path = stateToPath(merged)
     if (replace) window.history.replaceState(merged, '', path)
     else window.history.pushState(merged, '', path)
@@ -124,36 +91,9 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  // Closing the widget's "X" button calls agent.dispose(), which is terminal — the only way
-  // back in is to spin up a fresh PageAgent, since a disposed one can't be reused.
-  const openCopilot = () => {
-    if (copilotRef.current && !copilotRef.current.disposed) {
-      copilotRef.current.panel.show()
-    } else {
-      const agent = createCopilot()
-      agent.addEventListener('dispose', () => setCopilotOpen(false))
-      copilotRef.current = agent
-    }
-    setCopilotOpen(true)
-  }
-
-  useEffect(() => {
-    if (!user) return
-    openCopilot()
-    return () => copilotRef.current?.dispose()
-  }, [user])
-
-  const openProperty = (id) => {
-    logger.track('app', `Opened property inspector for PID ${id}.`, null, id)
-    navigate({ view: 'inspector', pid: id })
-  }
-  const openTriage = () => {
-    logger.track('app', 'Opened the high-variance triage queue.')
-    navigate({ view: 'portfolio', gridStatus: 'Flagged: High Variance' })
-  }
   const openTab = (id) => {
     logger.track('app', `Switched to "${id}" view.`)
-    navigate({ view: id, gridStatus: id === 'portfolio' ? '' : gridStatus, pid: null })
+    navigate({ view: id, pid: null })
   }
 
   return (
@@ -162,26 +102,20 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center gap-8">
           <div>
             <div className="font-semibold tracking-wide">TRIDENT-Val</div>
-            <div className="text-[11px] text-white/60 tracking-wide">Residential Portfolio AVM &amp; Risk Triage Engine · PoC Sandbox</div>
+            <div className="text-[11px] text-white/60 tracking-wide">Listings data explorer · local validation tool</div>
           </div>
           {user && (
             <nav className="flex gap-1 ml-auto">
               {tabsForRole(user.role).map((t) => (
                 <button key={t.id} onClick={() => openTab(t.id)}
                   className={`px-4 py-1.5 text-sm rounded-sm transition-colors ${
-                    view === t.id || (t.id === 'portfolio' && view === 'inspector')
+                    view === t.id
                       || (t.id === 'listings-quality' && (LISTINGS_VIEWS.has(view) || view === 'listing'))
                       ? 'bg-white/15 text-white' : 'text-white/70 hover:text-white'}`}>
                   {t.label}
                 </button>
               ))}
             </nav>
-          )}
-          {user && !copilotOpen && (
-            <button onClick={openCopilot} aria-label="Reopen AI copilot"
-              className="px-3 py-1.5 text-sm rounded-sm border border-white/20 text-white/80 hover:text-white hover:border-white/40 transition-colors">
-              ✦ Copilot
-            </button>
           )}
           {user && (
             <div className="flex items-center gap-3 text-sm text-white/70">
@@ -200,22 +134,6 @@ export default function App() {
         {user === null && <Login onLoggedIn={handleLoggedIn} />}
         {user && (
           <>
-            {view === 'about' && <About user={user} onNavigate={openTab} />}
-            {view === 'dashboard' && (
-              <Dashboard onTriage={openTriage} onOpen={openProperty}
-                onRevaluations={() => openTab('revaluations')} />
-            )}
-            {view === 'portfolio' && (
-              <PortfolioGrid key={gridStatus} onOpen={openProperty} initialStatus={gridStatus} />
-            )}
-            {view === 'map' && <MapView onOpen={openProperty} />}
-            {view === 'revaluations' && <RevaluationCycles user={user} onOpen={openProperty} />}
-            {view === 'model-card' && (
-              <ModelCard user={user} onBrowse={() => openTab('portfolio')} onCompare={() => openTab('compare')} />
-            )}
-            {view === 'compare' && <ModelCompare user={user} onOpen={openProperty} />}
-            {view === 'my-queue' && <MyQueue user={user} onOpen={openProperty} />}
-            {view === 'manager' && <ManagerDashboard onOpen={openProperty} />}
             {view === 'data-profile' && <DataProfile />}
             {LISTINGS_VIEWS.has(view) && (
               <ListingsShell view={view} onNavigate={(id) => { if (id === 'listings') setListingFilters({}); openTab(id) }}>
@@ -250,15 +168,12 @@ export default function App() {
                 <ListingInspector recordId={pid} user={user} onOpen={(id) => navigate({ view: 'listing', pid: id })} onBack={() => navigate({ view: 'listings', pid: null })} />
               </ListingsShell>
             )}
-            {view === 'inspector' && (
-              <Inspector pid={pid} user={user} onBack={() => navigate({ view: 'portfolio', pid: null })} onOpen={openProperty} />
-            )}
           </>
         )}
       </main>
 
       <footer className="max-w-7xl mx-auto px-6 py-4 text-[11px] text-inkmute border-t border-line">
-        Sandbox data: Ames Housing Dataset (De Cock, 2011). Loan balances and audit states are programmatically simulated. Not for production credit decisions.
+        Scraped listings are asking prices from a single site, collected for data validation. Not valuations, and not for credit decisions.
       </footer>
     </div>
   )

@@ -11,7 +11,6 @@
   "dependencies": {
     "leaflet": "^1.9.4",
     "loglevel": "^1.9.2",
-    "page-agent": "^1.11.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-leaflet": "^4.2.1",

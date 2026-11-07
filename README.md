@@ -1,593 +1,96 @@
-# TRIDENT-Val — Residential Portfolio AVM & Risk Triage Engine (PoC)
+# TRIDENT-Val: listings explorer (avm-explorer branch)
 
-End-to-end sandbox per PRD v1.0: a small **model risk inventory** — a LightGBM champion, a
-Ridge linear challenger, and an [OpenEvolve](https://github.com/elroy-galbraith/openevolve)-searched
-challenger, all trained/derived from the Ames Housing Dataset's 2,930 assets — a FastAPI
-inference service, PostgreSQL portfolio book, and a multi-view React/Tailwind workbench for
-risk officers and underwriters.
+A local tool for sanity-checking the ATS AVM data pipeline: a FastAPI backend and a React
+workbench over the scraped Jamaican listings (`listings_raw.listing_observation_raw`), plus
+ydata-profiling reports for any tabular dataset you point it at.
 
-**Champion holdout accuracy:** MAPE 7.9%, R² 0.94. **Live inference latency:** ~40 ms round-trip.
+This branch is a trimmed fork of TRIDENT-Val's `main`. The Ames-based demo (portfolio views,
+champion/challenger governance, revaluation cycles, PDF reports, AI copilot, Terraform and
+deploy workflow) lives on `main`; nothing was removed from there.
 
-**Champion/challenger governance:** exactly one registered model is the *champion* — its
-valuation is what gets booked onto every asset. Every other model is a *challenger*: it scores
-the whole portfolio in shadow, alongside the champion, and never books anything on its own.
-Where the two disagree beyond a threshold, that asset routes to a disagreement queue for a
-human decision (book the champion, book the challenger, or a manual override) — logged with a
-rationale to the audit ledger. Promoting a challenger to champion is a separate, deliberate,
-Admin-only act that re-books the whole portfolio in one pass. See
-[Model Governance](#model-governance-championchallenger) below.
+**Local use only.** It ships fixed demo logins (below). Do not deploy it or expose it beyond
+localhost.
 
-## Quickstart — Docker (recommended, matches PRD stack)
+## Quickstart
 
 ```bash
-cp .env.example .env   # optional — only needed to enable the AI copilot, see below
-docker compose up --build
+python -m venv .venv            # Python 3.12
+.venv/Scripts/pip install -r backend/requirements.txt     # macOS/Linux: .venv/bin/pip
+.venv/Scripts/python scripts/seed_users.py                 # creates ./trident.db and the demo logins
+
+# terminal 1 (backend, http://localhost:8000)
+cd backend && ../.venv/Scripts/python -m uvicorn app.main:app --port 8000 --reload
+
+# terminal 2 (frontend, http://localhost:5173)
+cd frontend && npm install && npm run dev
 ```
 
-- App: http://localhost:8080
-- API docs (Swagger): http://localhost:8000/docs
+Log in as `admin` / `admin123` (also `underwriter` / `underwriter123` and `viewer` / `viewer123`).
+`seed_users.py` only creates missing tables and users; it never drops anything, so reviewer flags
+survive a re-run.
 
-First boot trains nothing (the fitted models ship in `model/lgbm_v1/`, `model/linear_v1/`,
-and `model/evolved_v1/`) and auto-seeds Postgres: 2,930 properties, simulated loan balances at
-60–90% of baseline sale price, all three models registered and shadow-scoring the whole
-portfolio, variance-based audit
-triage from the champion's valuation, a deterministic multi-photo labeled Unsplash mapping
-per property, and three demo user logins (see
-[Authentication & Roles](#authentication--roles-poc-grade)). Seeding is idempotent.
-
-**Upgrading an existing checkout?** This adds a login and a new `users` table, and reshapes
-`property_images` into a one-to-many, labeled table (`PropertyImage` gained `id`/`label`/
-`sort_order` columns) — see the fresh-database note in
-[Authentication & Roles](#authentication--roles-poc-grade) before
-you boot against an existing Postgres volume or `trident.db`.
-
-## Quickstart — no Docker (SQLite fallback)
-
-```bash
-cp .env.example .env   # optional — only needed to enable the AI copilot, see below
-pip install -r backend/requirements.txt
-PYTHONPATH=scripts python scripts/seed_db.py          # creates ./trident.db
-cd backend && uvicorn app.main:app --port 8000        # terminal 1
-cd frontend && npm install && npm run dev             # terminal 2 -> http://localhost:5173
-```
-
-On Windows PowerShell replace the seed line with:
-`$env:PYTHONPATH="scripts"; python scripts/seed_db.py`
-
-Upgrading an existing checkout? Delete `trident.db` and rerun the seed script — see
-[Authentication & Roles](#authentication--roles-poc-grade).
-
-## Deploying to Google Cloud
-
-Production/demo hosting runs on GCP (Cloud Run + Cloud SQL), provisioned by Terraform
-in `terraform/` with GitHub Actions CI/CD (`.github/workflows/deploy.yml`) deploying
-on every push to `main`. See [docs/deployment.md](docs/deployment.md) for the full
-setup walkthrough and [ADR 0017](docs/adrs/0017-gcp-cloud-run-terraform-infrastructure.md)
-for the reasoning.
-
-## Authentication & Roles (PoC-grade)
-
-TRIDENT-Val requires a login. This is a lightweight foundation for governance — a real
-login, a few roles with different permissions, and audit-trail entries that name the
-human responsible — not production-grade IAM. See "Out of scope" below for what's
-deliberately not here yet.
-
-**No in-place upgrade — start from a fresh database.** There's no migration tool (schema
-is managed via `Base.metadata.create_all`, which only ever adds tables, never columns to
-existing ones), and the new `users` table only gets populated by a full reseed. If you
-have an existing checkout:
-- Docker: `docker compose down -v && docker compose up --build` (the `-v` is required —
-  it drops the `pgdata` volume; skipping it leaves you with an empty `users` table and
-  broken logging, since `system_logs` is also missing its new `actor` column).
-- Local/SQLite: delete `trident.db` and rerun `python scripts/seed_db.py`.
-
-### Demo credentials
-
-Seeded by `scripts/seed_db.py`, printed to the console on every reseed. These are fixed
-PoC fixtures, not secrets — don't reuse them anywhere, and don't expose this app beyond a
-trusted local/demo network with the defaults intact.
-
-| Username | Password | Role |
-|---|---|---|
-| `viewer` | `viewer123` | Viewer |
-| `underwriter` | `underwriter123` | Underwriter |
-| `admin` | `admin123` | Admin |
-
-### Role matrix
-
-| Role | View portfolio / properties / models | Read the audit log ledger (`/logs`) | Write audit / triage decisions | Promote a challenger to champion |
-|---|---|---|---|---|
-| Viewer | Yes | No | No | No |
-| Underwriter | Yes | Yes | Yes | No |
-| Admin | Yes | Yes | Yes | Yes |
-
-Model promotion is Admin-only and Admin-only alone — it's the one place the role split isn't
-a placeholder: re-booking the entire portfolio from a different model is a portfolio-level
-model risk decision, not a per-asset override, so it sits one rung above the Underwriter's
-day-to-day triage authority.
-
-Every write is attributed: `PATCH /properties/{pid}/audit`, `POST
-/properties/{pid}/triage-decision`, and `POST /models/{model_id}/promote` all record the
-acting username (and, for the latter two, the rationale text) against the change in
-`system_logs.actor`/`system_logs.context`, queryable via `GET /api/v1/logs`. The frontend
-backs this with a server-enforced check — the Inspector's audit/triage controls and the
-Model Card's "Promote to Champion" button are disabled or hidden for roles that can't use
-them, but the real gate is the API's `require_role` dependency, not the disabled attribute.
-
-### Out of scope (foundation for later)
-
-Deliberately not built in this pass, so it's easy to pick up without re-deriving scope:
-
-- Password reset, self-service signup, SSO, MFA
-- Per-property or per-neighborhood row-level permissions (today's gating is per-action:
-  read vs. write-audit vs. read-ledger)
-- Rate limiting / lockout on failed logins
-- Automatic HTTPS enforcement (no redirect/HSTS). The session cookie's `Secure` flag is
-  configurable via `SESSION_COOKIE_SECURE` (defaults to `false`, appropriate for
-  local/demo `http://localhost`) but nothing forces the connection itself onto HTTPS
-- Alembic (or any) migration tooling — schema changes still require a full reseed
-- Server-side session revocation before expiry (the signed cookie can only be
-  invalidated early by rotating `SESSION_SECRET` for everyone)
-- Any user-management UI — adding/removing/resetting a demo user means editing
-  `scripts/seed_db.py` and doing a fresh reseed
-
-## Model Governance (Champion/Challenger)
-
-Model risk management, not just a second AVM for comparison's sake — this mirrors how a
-bank's model validation function is expected to operate a model inventory (model cards,
-shadow scoring, governed promotion) rather than swapping in whichever model scores best on
-a leaderboard.
-
-- **Registry** (`models` table, populated from `model/<id>/manifest.json` at seed time):
-  every trained model's name, version, architecture, explainability method, holdout metrics,
-  and governance status — `Champion` (exactly one; its valuation is booked), `Challenger`
-  (scores the portfolio in shadow, never booked), or `Retired`.
-- **Shadow scoring** (`model_valuations` table): every registered model is scored against
-  every property at seed time — an append-only ledger, never overwritten in place — so
-  champion-vs-challenger comparison and the disagreement queue are just queries against
-  historical valuations, not live re-inference.
-- **Three genuinely different architectures**, not version bumps, so their disagreement is a
-  real signal:
-  - `lgbm_v1` — LightGBM gradient-boosted trees, `tree_shap` explainer (native TreeSHAP via
-    `pred_contrib=True`).
-  - `linear_v1` — Ridge linear regression, `linear_coef` explainer (exact per-feature
-    attribution from the model's own coefficients, mapped back from the one-hot-encoded
-    design matrix to the original feature names). Tends to diverge most on high-end and
-    unusual properties — it structurally can't represent the interaction effects the tree
-    model captures — which is exactly what makes its disagreements worth routing to a human
-    rather than averaging away.
-  - `evolved_v1` — an architecture OpenEvolve (an LLM-driven evolutionary code search, run
-    against the Claude Code CLI) searched for rather than one a person hand-picked, using
-    `occlusion` explainer (model-agnostic baseline-swap attribution — see
-    [Evolving a Challenger](#evolving-a-challenger-openevolve--claude-code-cli) below). A
-    third, independently-derived architecture rather than a restatement of the other two: a
-    `VotingRegressor` blend of extremely-randomized trees, `HistGradientBoostingRegressor`,
-    and k-nearest-neighbors, arrived at over 15 generations and holding its own against the
-    hand-built champion: holdout MAPE 7.82% vs. the champion's 7.88%, R² tied at 0.9415.
-- **Comparison & disagreement queue** (`GET /api/v1/models/compare`,
-  `GET /api/v1/models/disagreements`, surfaced in the frontend's Compare tab): an agreement
-  scatter, per-neighborhood MAPE/bias breakdown, and a divergence-ranked queue with a
-  configurable threshold.
-- **Triage decision** (`POST /api/v1/properties/{pid}/triage-decision`, Underwriter/Admin):
-  for one asset, book the champion's value, book a specific challenger's value, or a manual
-  override — each requires a rationale, logged to the audit ledger, and updates the booked
-  `current_avm_value`/`avm_variance_pct`/`audit_status` in the same pass.
-- **Promotion** (`POST /api/v1/models/{model_id}/promote`, Admin-only): designates a new
-  champion at the portfolio level and re-books every asset's `current_avm_value` from that
-  model's shadow valuations in one transaction — a deliberate, logged, all-or-nothing act,
-  never a per-asset choice.
-
-Out of scope for this pass: automatic retraining/CI for new model versions, drift
-monitoring/alerting, and a fairness/disparate-impact audit across models — see the Model
-Card's Limitations section for what each model doesn't cover.
-
-## Retraining the models
-
-```bash
-python scripts/train_model.py   # writes model/lgbm_v1/ and model/linear_v1/, each with
-                                 # model.joblib + feature_spec.json + manifest.json
-```
-
-Retraining alone doesn't change what's booked — rerun `scripts/seed_db.py` afterward to
-re-register the models and re-score the portfolio, or use `POST /models/{model_id}/promote`
-against a running app to promote a specific version without a full reseed.
-
-## Evolving a Challenger (OpenEvolve + Claude Code CLI)
-
-`model/evolved_v1/` isn't hand-designed — its feature engineering, estimator choice, and
-hyperparameters were searched for by [OpenEvolve](https://github.com/elroy-galbraith/openevolve),
-an LLM-driven evolutionary code search, using the Claude Code CLI as the LLM backend (no API
-key needed — auth is the CLI's own OAuth session). It's a real third architecture family in
-the registry, not a relabeled copy of the champion or linear challenger — see the Model
-Governance section above for why that structural independence is the point.
-
-**What's checked in**, under `scripts/evolve/`:
-- `initial_program.py` — the seed program: an `EVOLVE-BLOCK`-wrapped `build_model(...)`
-  function (starts from a bagged extremely-randomized-trees pipeline, a different family
-  from both the champion's boosted trees and the linear challenger).
-- `evaluator.py` — trains each generation's candidate against the *same* Ames holdout split
-  `scripts/train_model.py` uses (same outlier drop, same 80/20 split, same `random_state=42`,
-  same `log1p(SalePrice)` target), so its MAPE/R² is directly comparable to `lgbm_v1`/`linear_v1`.
-- `config.yaml` — `llm.provider: claude_code`, model `sonnet`, plus the system message that
-  constrains the search space (scikit-learn/pandas/numpy only, fixed function signature, no
-  network access) and steers it toward architectures likely to disagree with the other two
-  in useful ways (bagged/randomized trees, non-LightGBM boosting, kernel/distance methods, or
-  small blends of these) rather than a re-derivation of gradient boosting or linear regression.
-
-`scripts/evolve_challenger.py` orchestrates a run end to end: it drives OpenEvolve (via its
-`run_evolution` library API) through `max_iterations` generations, takes the winning program,
-refits it on the training split, and writes `model/evolved_v1/{model.joblib,
-feature_spec.json, manifest.json}` — the same three-file shape `scripts/train_model.py`
-writes — plus `evolved_program.py`, a transparency copy of the exact winning code, so what
-got registered is auditable, not a black box. Because its architecture isn't known in
-advance, it's explained via a new `occlusion` explainer (see Design notes below) rather than
-the champion's native TreeSHAP or the linear challenger's own coefficients. `write_artifact`
-(shared with `scripts/train_model.py`) joblib-compresses every `model.joblib` — barely
-noticeable for the champion's single booster, but it's what keeps an evolved ensemble (this
-run landed a 3-way blend, ~50MB raw) to a repo-friendly size on disk.
-
-```bash
-# One-time setup — this is a dev/tooling flow, so it lives in its own venv rather than
-# folding openevolve into backend/requirements.txt as a runtime dependency of the app:
-python3 -m venv .venv-evolve && source .venv-evolve/bin/activate
-pip install -r backend/requirements.txt openevolve pyyaml
-npm install -g @anthropic-ai/claude-code && claude login   # if not already installed/authed
-
-# Run the evolution (15 iterations by default, ~10-15 minutes) and register the result:
-python scripts/evolve_challenger.py
-python scripts/seed_db.py   # re-registers all three models and re-scores the portfolio
-```
-
-Pass `--iterations N` to shorten/lengthen the search, or `--code path/to/best_program.py` to
-re-materialize an already-evolved program (e.g. from a prior `openevolve_output/best/`)
-without spending LLM calls on a fresh run. Like the champion/linear challenger, evolving a
-new candidate doesn't change what's booked on its own — it registers as a `Challenger`
-(`default_status` in its manifest); promotion is still the separate, deliberate, Admin-only
-act described above.
-
-## AI Copilot (page-agent)
-
-The frontend ships [page-agent](https://github.com/alibaba/page-agent) — a floating,
-in-page agent that reads the DOM as text and drives the UI on the user's behalf (open a
-property, change a filter, walk through a chart) via natural-language requests. It talks
-an OpenAI-compatible chat-completions API.
-
-The LLM API key is never sent to the browser: `frontend/src/copilot.js` points
-page-agent's `baseURL` at `/api/v1/copilot`, a same-origin FastAPI proxy
-(`backend/app/main.py`) that attaches the real key and forwards to the provider.
-
-Copy `.env.example` to `.env` and set `COPILOT_PROVIDER_API_KEY` to enable it — both
-`docker compose` (which auto-loads a root `.env`) and the no-Docker `uvicorn` path (via
-`python-dotenv`, loaded at the top of `main.py`) pick it up the same way. Leave `.env`
-unset/absent and the proxy just returns 503; the rest of the app is unaffected.
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `COPILOT_PROVIDER_API_KEY` | *(empty)* | Provider API key. Unset = the proxy returns 503 and the widget is inert. |
-| `COPILOT_PROVIDER_BASE_URL` | Gemini's OpenAI-compat endpoint | Swap for Anthropic's OpenAI-compatible endpoint, OpenAI itself, etc. |
-| `COPILOT_MODEL` | `gemini-2.5-flash` | Server-controlled — the browser cannot override which model is billed. |
-
-**Guardrails:** the audit status dropdown, underwriter notes field, and "Save audit
-decision" button on the Inspector carry a `data-page-agent-not-interactive` attribute, so
-the agent can read them but cannot click or type into them — an AI copilot should not be
-able to write to the audit ledger unsupervised. The Risk Overview charts are SVG and
-unreadable as DOM text; `transformPageContent` in `copilot.js` appends their underlying
-JSON (LTV distribution, neighborhood concentration) to the agent's context so it can
-answer chart questions without guessing.
-
-**Reopening the widget:** the panel's own "X" button calls `agent.dispose()`, which is
-terminal — a disposed `PageAgent` can't be reused. `App.jsx` tracks this via the agent's
-`dispose` event and shows a "✦ Copilot" button in the header once the widget is closed,
-which spins up a fresh instance.
-
-**Activity log:** every history event (steps, retries, errors) is mirrored into the same
-`system_logs` ledger as the rest of the app via `logger.track('copilot', ...)` — query
-`GET /api/v1/logs?logger=copilot` to see what the agent has done. Note this persists
-reflection/action summaries (not the full page-content payload sent to the LLM, which only
-transits the network), so it's a smaller but real exposure of whatever's on screen when the
-agent acts — worth keeping in mind alongside the audit-ledger fencing above.
-
-## Report Export (IVS 103 / RICS Red Book VPS 6)
-
-Two exportable PDF reports, rendered entirely server-side (FastAPI + Jinja2 + WeasyPrint —
-`backend/app/reports.py`, `backend/app/templates/`; no browser rendering involved): a
-per-asset **Underwriter Decision Report** and a portfolio-wide **Portfolio Review Summary**.
-Both are structured against the IVS 103 / RICS Red Book VPS 6 minimum-content skeleton —
-asset identification, valuation date, basis of value, approach and model used, key inputs and
-significant assumptions, limitations, and sign-off — the professional anchor a RICS-trained
-valuer (JN Bank's own included) will recognize, rather than a generic "export PDF" button.
-
-**Framing matters.** Under IVS, no model output — an AVM included — constitutes a compliant
-valuation without a valuer's professional judgement applied to it. So this is deliberately
-*not* "the AVM's valuation report" — it's the **underwriter's decision record, supported by
-AVM output**, built from the same audit lifecycle (`audit_status`, `underwriter_notes`, and
-the `system_logs` decision trail) described above. Every report is explicit about what it is:
-it is never labeled "RICS-compliant" (that requires a Registered Valuer's direct involvement),
-only "structured in accordance with IVS 103 / RICS Red Book VPS 6 reporting requirements" —
-and if an asset's audit status isn't yet Approved, the report says so in a banner up front
-rather than reading like a completed sign-off.
-
-**The LLM narrates, it never computes.** Every figure in a report is pulled straight from the
-database or the same inference pipeline behind the Inspector page (`backend/app/inference.py`)
-— nothing is calculated freshly for the PDF. The only generated text is a handful of short
-narrative paragraphs — variance commentary from the SHAP driver table, a champion/challenger
-disagreement explanation, a synthesis of the underwriter's own notes, and asset-specific
-limitations context (portfolio report: one executive summary) — drafted at low temperature
-(0.2, `backend/app/narrative.py`) from a prompt that embeds only the report's own structured
-data and explicitly forbids introducing any number or claim not already in that payload.
-Generated sections are visibly delimited in the document (dashed "AI-drafted" boxes) so a
-reader always knows which paragraphs are narration versus structured data. Every report also
-carries a standing **AI Use & Compliance Disclosure** box naming the drafting model, which
-sections it drafted, and who reviewed/booked the underlying decision — RICS's responsible-AI
-disclosure expectation made literal, not a compliance checkbox.
-
-Reports still generate in full with no LLM configured — "AI-drafted" sections render a
-clearly-labeled placeholder instead of prose, and every figure they would have referenced is
-already in the report's structured data either way.
-
-Routed through **OpenRouter** (an OpenAI-compatible model aggregator) so the drafting model
-can be swapped by config alone; defaults to **Gemini 2.5 Flash**. This is a separate,
-server-side-only LLM call from the AI copilot above, with its own provider config — the
-narrative text is baked into the PDF at generation time, and (like the copilot) the provider
-API key never has a code path to the browser.
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `REPORT_LLM_PROVIDER_API_KEY` | *(empty)* | OpenRouter API key. Unset = reports still generate in full; AI-drafted sections show a placeholder instead of prose. |
-| `REPORT_LLM_PROVIDER_BASE_URL` | `https://openrouter.ai/api/v1` | Swap for any other OpenAI-compatible aggregator/provider. |
-| `REPORT_LLM_MODEL` | `google/gemini-2.5-flash` | Drafting model, addressed by its OpenRouter slug. |
-
-**Endpoints:** `GET /api/v1/properties/{pid}/report` and `GET /api/v1/portfolio/report`
-(the latter takes optional `?champion=&challenger=` to pick which two registered models the
-governance section compares). Both open to any logged-in role, same precedent as the CSV
-export — exporting is a different format of data every role can already see live in-app, not
-a new write privilege. Every export is itself logged to the audit ledger
-(`GET /api/v1/logs`), naming who generated it and when.
-
-**Running WeasyPrint locally (no Docker):** it needs Pango/Fontconfig's native libraries, not
-just the `weasyprint` pip package. WeasyPrint itself needs no cairo/GDK-Pixbuf install — recent
-versions render through a pure-Python backend.
-- Debian/Ubuntu: `apt install libpango-1.0-0 libpangoft2-1.0-0 libfontconfig1 fonts-liberation`
-  (see `backend/Dockerfile` for the Docker path, which installs these automatically).
-- macOS: `brew install pango` (pulls in glib/harfbuzz/fontconfig transitively). If it still
-  can't find the library after that — a known Homebrew + `cffi`/`dlopen` gotcha, more common
-  on Apple Silicon, where Homebrew installs to `/opt/homebrew` instead of `/usr/local` — set
-  `export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib"` in the same shell before starting
-  uvicorn.
-
-## Revaluation Cycles (Collateral Monitoring)
-
-A one-time valuation is what a human valuer already delivers; the AVM's actual business case
-is revaluing the whole book on a recurring cadence at near-zero marginal cost — collateral
-monitoring, LTV drift, IFRS 9 provisioning inputs. The **Revaluation Cycles** tab turns the
-static snapshot into that operating loop: run a cycle → the LTV distribution shifts → the
-triage queue refills → underwriters work it via the same audit/triage endpoints described
-above → a cycle report exports.
-
-**Cycles, not a market simulator.** Each run (`revaluation_runs`, one row per cycle) applies a
-neighborhood-level market index adjustment to every asset's currently booked AVM value and
-refreshes LTV — this is deliberately not a time-series forecast, it's the same mechanism as
-HPI-indexed AVM updating between full model-backed revaluations in conventional practice. A
-champion promotion still re-anchors every value to raw model output; a cycle indexes on top of
-whatever is currently booked. Four scenario types (`POST /api/v1/revaluations`):
-
-- **Standard Quarterly Cycle** (`organic`) — small (±4%), deterministic per-neighborhood drift,
-  not a forecast — just enough movement to shift LTV buckets and occasionally trip a flag
-  between deliberate stress runs, the way a routine quarterly index update would.
-- **Broad Market Stress** (`broad_stress`) — one uniform shock applied to every neighborhood.
-- **Concentrated Neighborhood Shock** (`targeted_stress`) — an isolated shock to a single named
-  neighborhood, for a concentration-risk story ("what if our largest neighborhood corrects
-  15%?").
-- **Custom** (`custom`) — a full operator-specified `{neighborhood: pct}` map.
-
-**Triage gets a second signal.** Per-asset outcomes (`revaluation_results`) flag an asset where
-its value dropped more than 10% since the prior booked value, or its LTV is at/above 80% after
-the cycle — a period-over-period movement signal, distinct from (and additive to) the existing
-variance-vs-original-sale-price triage. A flag from a cycle escalates `audit_status` to
-`Flagged: High Variance` regardless of that asset's variance against the original sale price,
-so a stress scenario visibly refills the queue even for assets that were otherwise Approved.
-Gated the same as a triage decision (Underwriter/Admin) — this is routine collateral
-monitoring, not the portfolio-wide model risk decision that gates model promotion.
-
-**Cycle Report** (`GET /api/v1/revaluations/{run_id}/report`): the scenario and index
-adjustments applied, the before/after LTV distribution, largest movers, and the triage queue
-this cycle refilled, with an AI-drafted executive summary — same IVS 103 / Red Book framing,
-`.disclosure-box`, and LLM-narrates-never-computes guarantee as the asset/portfolio reports
-above (see [Report Export](#report-export-ivs-103--rics-red-book-vps-6)).
-
-## Listings Explorer (scraped Jamaican listings, read-only)
-
-A **Listings** tab for validating the scraped cbjamaica.com data that will eventually feed the
-AVM. The listings table itself is strictly read-only (nothing is ever written to BigQuery or GCS) and
-the explorer is independent of the models, triage and portfolio data. Model predictions are
-deliberately not shown. The one write path is reviewer **bad-parse flags**, stored in this app's own
-database (see below).
-
-- **Quality overview** — fill rate per field, parser gaps (raw text present but parsed value
-  missing), `amount_parse_status` / currency / `geo_source` / `geo_precision` / parish /
-  property-type counts, property type x listing type, and rows per `scrape_run_id` and fetch
-  date. Bars and fill rows click through to the grid, pre-filtered.
-- **Listings grid** — paginated cards, filters (parish, property/listing type, currency, parse
-  status, geo precision, scrape run, "missing field"), search and sort.
-- **Distributions** — log-binned histograms (computed server-side) of asking price (one chart per
-  currency), floor area and lot size (one per unit), price per floor-area unit (only `sqft`/`sqm`
-  rows, labelled, never converted or mixed), plus bedrooms. Outliers are flagged per currency/unit
-  facet with an IQR rule on log10 values (mild beyond 1.5 x IQR, extreme beyond 3 x IQR; facets with
-  fewer than 8 rows are not fenced) and link to the record inspector. A property type x listing type
-  heat table makes the mix obvious (only ~20% are houses) and clicks through to the grid.
-- **Map** — pins coloured by property type or by price quartile (within each currency), filters
-  (parish, types, currency, geo precision/source; "Show on map" on the grid carries its filters
-  over). A side panel lists suspicious geometry: pins outside Jamaica's bounding box (with a
-  swapped-lat/lon / lost-sign hint) and clusters of different MLS refs sharing identical
-  coordinates (centroid fallbacks).
-- **Repeat observations** — the same MLS ref can appear in several scrape runs. Distributions and
-  the map default to "latest observation per MLS ref" (`latest_only=true`) so they are not
-  double-counted; untick it to see every row.
-- **Record inspector** — raw vs parsed fields side by side with a parse status per field,
-  provenance (listing/canonical URL, `snapshot_uri`, `parser_version`, `http_status`, run id),
-  quality flags, and the image carousel (hotlinked from the source CDN; no images are stored).
-- **Run comparison** — lists the scrape runs and how much the same listing recurs across them
-  (listings are keyed by `site_listing_ref`, falling back to `canonical_url`; `record_id` is per
-  observation so it is not used), then diffs any two runs: listings only in A, only in B, in both,
-  and for those in both a field-level before/after (price, currency, status, type, bedrooms,
-  bathrooms, floor area/lot size + units, location, agent, ...). Differences between observations
-  parsed by different `parser_version`s are marked, since they may be parser changes rather than
-  site changes. If the runs don't overlap (or only one run exists) the tab says so instead of
-  showing an empty diff. API: `GET /api/v1/listings/runs`, `GET /api/v1/listings/runs/diff?run_a=&run_b=`.
-- **Bad-parse flags** — in the record inspector each raw-vs-parsed row has a flag button (⚑): pick a
-  reason (wrong value / not parsed / wrong unit / wrong currency / wrong category / other), an
-  optional expected value and note; the user and time come from the session, and the raw/parsed
-  values are snapshotted. Any non-Viewer can flag; only Admin resolves or deletes. The **Flags**
-  tab lists flags with status/field/reason filters and a CSV export (for turning open flags into
-  parser fixes), and the Quality overview shows the open-flag count. Flags live in the app DB
-  (`listing_flags` table, created by the usual `create_all`; SQLite or Postgres) and every write is
-  audit-logged with the actor. API under `/api/v1/listings/flags` (`GET`, `POST`,
-  `PATCH /{id}/resolve`, `DELETE /{id}`, `GET /summary`, `GET /meta`, `GET /export.csv`).
-
-Every Listings view carries a coverage banner: the data is a single-site crawl of the top of
-the market only (price-descending, ~540 of ~7,600 listings), and prices are asking prices,
-so distributions must not be read as the whole market.
-
-**Data source** (`backend/app/listings.py`, endpoints under `/api/v1/listings`: `summary`, `filters`, `distributions`, `geo`, `runs`, `runs/diff`, the grid list and `/{record_id}`; all read-only GETs, any logged-in role (the only writes are the flag endpoints above); `distributions`/`geo` accept the grid filters):
+## Listings source
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `LISTINGS_NDJSON_PATH` | unset | If set, read local NDJSON (a file, or a directory of `*.ndjson`) instead of BigQuery. Use this offline. |
+| `LISTINGS_NDJSON_PATH` | unset | Read local NDJSON (a file, or a directory of `*.ndjson`) instead of BigQuery. Fastest for development: BigQuery loads all rows with a plain `SELECT *` (about 75 s for ~9,000 rows) and every backend reload repeats it. |
 | `LISTINGS_BQ_PROJECT` | `ats-avm-jam` | Billing/job project for the query (must not be the gcloud default). |
 | `LISTINGS_BQ_TABLE` | `ats-avm-jam.listings_raw.listing_observation_raw` | Table to read. |
-| `LISTINGS_CACHE_TTL` | `300` | Seconds the loaded rows are cached in memory. |
+| `LISTINGS_CACHE_TTL` | `300` | Seconds the loaded rows stay cached in memory. |
+| `DATABASE_URL` | `sqlite:///./trident.db` | App DB (users, bad-parse flags, logs). |
 
-BigQuery uses Application Default Credentials (`gcloud auth application-default login`). The
-whole table (a few hundred rows) is loaded once with a plain `SELECT *` and cached, so the first
-request after startup takes several seconds. To run offline, pull the raw batches with
+BigQuery uses Application Default Credentials (`gcloud auth application-default login`). To work
+offline, pull the raw batches with
 `gcloud storage cp "gs://ats-avm-jam-listings-raw/batches/cbjamaica/*.ndjson" ./listings/` and set
-`LISTINGS_NDJSON_PATH=./listings` (rows are de-duplicated by `record_id`). Tests:
-`cd backend && python -m pytest tests`.
+`LISTINGS_NDJSON_PATH=./listings` (rows are de-duplicated by `record_id`).
 
-## Architecture
+## What's in the explorer
+
+The listings table is read-only; the one write path is reviewer bad-parse flags, stored in the app DB.
+
+- **Quality overview**: fill rate per field, parser gaps (raw text present but parsed value missing),
+  parse status / currency / geo precision / parish / property-type counts, rows per scrape run.
+- **Listings grid**: paginated cards with filters, search and sort.
+- **Distributions**: log-binned histograms of price, floor area, lot size and price per area, with IQR
+  outlier fences per currency/unit facet.
+- **Map**: pins by property type or price quartile, plus suspicious geometry (pins outside Jamaica,
+  clusters of different MLS refs on identical coordinates).
+- **Run comparison**: how much the same listing recurs across scrape runs, and a field-level diff
+  between any two runs.
+- **Record inspector**: raw vs parsed fields side by side, provenance, quality flags, images.
+- **Bad-parse flags**: flag a raw-vs-parsed field (wrong value / not parsed / wrong unit / ...), list
+  and filter flags, export them as CSV.
+- **Data Profile** (Admin): embeds ydata-profiling reports; see below.
+
+## Data profiles
+
+```bash
+python scripts/generate_profile.py                          # scraped listings, latest observation per MLS ref
+python scripts/generate_profile.py --all-observations       # every observation
+python scripts/generate_profile.py path/to/train.parquet --name training_set
+python scripts/generate_profile.py path/to/rows.csv --full  # correlations and interactions (slow on wide data)
+```
+
+Accepts `.csv`, `.parquet`, `.ndjson`, `.jsonl` and `.json`. Reports are written to
+`reports/data_profile/<name>.html` (git-ignored; override with `PROFILE_DIR`) and show up in the
+Data Profile tab after a reload.
+
+## Tests
+
+```bash
+cd backend && ../.venv/Scripts/python -m pytest tests
+```
+
+## Layout
 
 ```
-data/ames_raw.csv          De Cock Ames dataset (2,930 rows, zero-scrape ingestion)
-scripts/train_model.py     Trains champion (LightGBM) + challenger (Ridge linear) into
-                           model/<id>/{model.joblib, feature_spec.json, manifest.json}
-scripts/evolve/            OpenEvolve search space for the evolved challenger:
-                           initial_program.py (EVOLVE-BLOCK seed), evaluator.py (Ames-holdout
-                           scoring), config.yaml (Claude Code CLI backend) — see Evolving a
-                           Challenger above
-scripts/evolve_challenger.py  Drives OpenEvolve end to end, writes model/evolved_v1/
-scripts/seed_db.py         DB instantiation + model registry + shadow-scoring + image mapping
-model/
-  lgbm_v1/                 Champion artifact + manifest (architecture, explainer, metrics)
-  linear_v1/               Challenger artifact + manifest
-  evolved_v1/               Challenger artifact + manifest + evolved_program.py (the winning
-                           OpenEvolve-searched source, kept next to the artifact it produced)
 backend/app/
-  models.py                properties / bank_portfolio_meta / property_images / system_logs /
-                           users / models (registry) / model_valuations (shadow-scoring ledger) /
-                           revaluation_runs / revaluation_results (collateral monitoring cycles)
-  auth.py                  bcrypt hashing + session-cookie get_current_user / require_role deps
-  inference.py             Model-ID-keyed scoring; tree_shap (native TreeSHAP) and
-                           linear_coef (exact coefficient attribution) explainers
-  logging_config.py        loguru setup: console, rotating file, and DB sinks
-  narrative.py             OpenRouter client for report narrative drafting (low-temperature,
-                           grounded-only prompting; see Report Export above)
-  reports.py               Report data assembly (IVS 103 / Red Book VPS 6 context) + Jinja2 ->
-                           WeasyPrint PDF rendering
-  templates/               report.css + asset_report.html + portfolio_report.html +
-                           revaluation_report.html
-  main.py                  REST API (see below)
-frontend/src/
-  logger.js                loglevel wrapper: human-readable console + remote shipping
-  copilot.js               page-agent setup: proxy baseURL, task context, chart summaries
-  views/
-    Login.jsx              Username/password login form
-    Dashboard.jsx          View 1 — exposure, avg LTV, triage count, LTV histogram,
-                           neighborhood concentration chart
-    PortfolioGrid.jsx      View 2 — listing-style cards, filters, sort, CSV export
-    Inspector.jsx          View 3 — glass-box matrix, SHAP/coefficient widget, what-if
-                           scenario panel, delta meter, audit lifecycle box, model
-                           comparison & triage decision panel (role-gated)
-    RevaluationCycles.jsx  View 4 — collateral monitoring: run a cycle (standard/broad
-                           stress/targeted stress/custom), cycle history, before/after LTV
-                           shift, largest movers, triage queue refilled, cycle report export
-    ModelCard.jsx          View 5 — model risk inventory + plain-language model card per
-                           registered model: what it does, holdout accuracy, training data
-                           provenance, interactive global feature-importance chart,
-                           limitations & appropriate use, promote-to-champion (Admin)
-    ModelCompare.jsx       View 6 — champion vs. challenger agreement scatter,
-                           per-neighborhood error/bias breakdown, disagreement queue,
-                           promote-to-champion (Admin)
+  main.py            app, login/session, logs, data-profile routes
+  listings.py        read-only listings explorer API
+  listing_flags.py   bad-parse flags (the only write path)
+  inference.py       kept from the Ames demo as a starting point for a model-check adapter; unused by the app
+  auth.py db.py models.py logging_config.py
+backend/tests/       listings tests and an NDJSON fixture
+frontend/src/        React + Tailwind views (Listings*, DataProfile, Login)
+scripts/             seed_users.py, generate_profile.py
 ```
-
-### Key API endpoints
-
-All endpoints below require a logged-in session unless noted; ⚑ marks Underwriter/Admin-only,
-⚑⚑ marks Admin-only.
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/api/v1/auth/login` | Log in, set the session cookie (open) |
-| POST | `/api/v1/auth/logout` | Clear the session |
-| GET | `/api/v1/auth/me` | Current user, or 401 (frontend's session check) |
-| GET | `/api/v1/portfolio/summary` | Macro banners + chart data |
-| GET | `/api/v1/properties` | Filtered/paginated grid |
-| GET | `/api/v1/properties/{pid}` | Full asset file + baseline explainability (resolved model) |
-| GET | `/api/v1/properties/{pid}/valuations` | Every registered model's shadow valuation for one property |
-| POST | `/api/v1/valuate` | Live what-if inference against any model (±5% band + drivers) |
-| PATCH | `/api/v1/properties/{pid}/audit` | ⚑ Underwriter notes + status writeback |
-| POST | `/api/v1/properties/{pid}/triage-decision` | ⚑ Resolve a champion/challenger disagreement (book champion/challenger/manual + rationale) |
-| GET | `/api/v1/properties/export` | Structural CSV download |
-| GET | `/api/v1/properties/{pid}/report` | Underwriter Decision Report (PDF) — see Report Export |
-| GET | `/api/v1/portfolio/report` | Portfolio Review Summary (PDF) — see Report Export |
-| POST | `/api/v1/revaluations` | ⚑ Run a revaluation cycle (organic/broad_stress/targeted_stress/custom) — see Revaluation Cycles |
-| GET | `/api/v1/revaluations` | Cycle history with per-run summary stats |
-| GET | `/api/v1/revaluations/{run_id}` | One cycle's index adjustments, before/after LTV distribution, largest movers |
-| GET | `/api/v1/revaluations/{run_id}/flagged` | Paginated triage queue this cycle flagged |
-| GET | `/api/v1/revaluations/{run_id}/report` | Revaluation Cycle Report (PDF) — see Report Export |
-| GET | `/api/v1/models` | The model risk inventory: every registered model + governance status |
-| GET | `/api/v1/models/{model_id}` \| `/spec` \| `/importance` | Per-model card, feature spec, portfolio-wide feature importance (cached) |
-| POST | `/api/v1/models/{model_id}/promote` | ⚑⚑ Admin-only: designate a new champion, re-book the whole portfolio |
-| GET | `/api/v1/models/compare` | Champion vs. challenger: scatter points, per-neighborhood error/bias, agreement stats |
-| GET | `/api/v1/models/disagreements` | Paginated, divergence-ranked triage queue |
-| GET | `/api/v1/logs` | ⚑ Query the unified operational/audit log ledger (supports `?actor=`) |
-| POST | `/api/v1/logs/client` | Ingest batched frontend (loglevel) log entries (open — see Authentication & Roles) |
-| POST | `/api/v1/copilot/chat/completions` | AI copilot LLM proxy (see below) |
-
-### Design notes
-
-- **Audit triage seeding** flags assets where |champion AVM − Sale| / Sale > 15%
-  (Pending Review at 8–15%), producing a realistic queue: ~130 flagged, ~390 pending.
-- **Explainability is real, not mocked, for every registered model**: the champion's
-  LightGBM uses `pred_contrib=True` for exact TreeSHAP values; the linear challenger uses
-  its own fitted coefficients (transformed-column contributions summed back to each
-  original feature) — an exact attribution, not an approximation borrowed from a different
-  model family. The evolved challenger's architecture isn't fixed in advance, so it gets a
-  third, model-agnostic method instead (`occlusion` in `backend/app/inference.py`): each
-  feature is swapped for a fixed training-time baseline (median for numeric/ordinal, mode
-  for categorical, stored in that model's own `feature_spec.json`) and the resulting shift
-  in the log-space prediction is its contribution — works for any estimator exposing
-  `.predict(X)`, at the cost of one extra prediction pass per feature. All three are
-  converted to dollar impact the same way at the prediction point, so drivers stay directly
-  comparable across the whole registry.
-- **Loan balances** use a seeded RNG (deterministic across rebuilds).
-- **Logging**: the backend (`loguru`) and frontend (`loglevel`) both log in a
-  human-readable, timestamped format, and both feed the same `system_logs` table —
-  request/inference telemetry, underwriter audit-trail events (status/notes changes,
-  scenario re-valuations), and frontend errors/usage events all land in one place,
-  queryable via `GET /api/v1/logs`. Every event is attributed to the authenticated
-  session via `system_logs.actor` where one exists (see
-  [Authentication & Roles](#authentication--roles-poc-grade)). Backend logs also go to a
-  rotating `logs/backend.log` file for local debugging.
-- Out of scope per PRD: multi-tenancy, geospatial map servers. Document generation (exported
-  PDF reports) is covered below — see
-  [Report Export](#report-export-ivs-103--rics-red-book-vps-6). Auth now exists in
-  lightweight, PoC-grade form — see
-  [Authentication & Roles](#authentication--roles-poc-grade).
-
-## PRD success metrics
-
-| Metric | Status |
-|---|---|
-| Zero-scrape ingestion | ✅ Ames CSV + programmatic image hooks only |
-| Inference latency < 200 ms | ✅ ~40 ms measured round-trip |
-| Cohesive UX story | ✅ Risk overview → listing grid → operational override panel |

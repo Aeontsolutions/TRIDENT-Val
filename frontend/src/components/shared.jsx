@@ -1,59 +1,7 @@
 import React, { useState } from 'react'
-import { ltvTier, tierColor, pct } from '../api.js'
 
 export const FALLBACK_IMG =
   'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="100%25" height="100%25" fill="%23DDE3E0"/><text x="50%25" y="50%25" font-family="sans-serif" font-size="16" fill="%235B6B77" text-anchor="middle">Residential asset</text></svg>'
-
-const statusStyle = {
-  'Approved': 'bg-ok/10 text-ok border-ok/30',
-  'Pending Review': 'bg-amber/10 text-amber border-amber/30',
-  'Flagged: High Variance': 'bg-flag/10 text-flag border-flag/30',
-}
-
-export function StatusBadge({ status }) {
-  return (
-    <span className={`inline-block px-2 py-0.5 text-[11px] font-medium border rounded-sm ${statusStyle[status] || ''}`}>
-      {status}
-    </span>
-  )
-}
-
-const modelStatusStyle = {
-  'Champion': 'bg-tealdeep/10 text-tealdeep border-tealdeep/30',
-  'Challenger': 'bg-amber/10 text-amber border-amber/30',
-  'Retired': 'bg-inkmute/10 text-inkmute border-inkmute/30',
-}
-
-export function ModelStatusBadge({ status }) {
-  return (
-    <span className={`inline-block px-2 py-0.5 text-[11px] font-semibold border rounded-sm ${modelStatusStyle[status] || ''}`}>
-      {status}
-    </span>
-  )
-}
-
-const assignmentStateStyle = {
-  'Open': 'bg-inkmute/10 text-inkmute border-inkmute/30',
-  'In Progress': 'bg-amber/10 text-amber border-amber/30',
-  'Done': 'bg-ok/10 text-ok border-ok/30',
-}
-
-export function AssignmentStateBadge({ state }) {
-  return (
-    <span className={`inline-block px-2 py-0.5 text-[11px] font-medium border rounded-sm ${assignmentStateStyle[state] || ''}`}>
-      {state}
-    </span>
-  )
-}
-
-export function LtvChip({ ltv }) {
-  const tier = ltvTier(ltv)
-  return (
-    <span className="figure text-[12px] font-semibold" style={{ color: tierColor[tier] }}>
-      LTV {pct(ltv)}
-    </span>
-  )
-}
 
 export function Spinner({ label = 'Loading…' }) {
   return <div className="py-16 text-center text-inkmute text-sm">{label}</div>
