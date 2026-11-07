@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import math
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -151,6 +152,35 @@ def _tail(text: str, lines: int = 2, limit: int = 300) -> str:
     return kept[-limit:]
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the child and everything it started. `uv run` launches python as a grandchild; killing only `uv` would leave
+    that grandchild holding the output pipes, and the caller would wait until it finished anyway."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)  # the child leads its own session (start_new_session below)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    proc.kill()
+
+
+def _run_child(cmd: list[str], *, input: str, timeout: float, env: dict) -> subprocess.CompletedProcess:
+    """subprocess.run(..., capture_output=True, timeout=...) that kills the whole process tree on timeout."""
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", env=env, start_new_session=os.name != "nt")
+    try:
+        stdout, stderr = proc.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=10)  # reap the child and close the pipes
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def run_scorer(request: dict) -> dict:
     """Run the scorer under the monorepo env with ``request`` on stdin and return its parsed response.
 
@@ -164,8 +194,7 @@ def run_scorer(request: dict) -> dict:
            "python", str(SCORER_PATH)]
     env = {k: v for k, v in os.environ.items() if k not in SCORER_ENV_DROP}
     env["MLFLOW_TRACKING_URI"] = _tracking_uri()
-    done = subprocess.run(cmd, input=json.dumps(request), capture_output=True, text=True, encoding="utf-8",
-                          timeout=_timeout_s(), env=env)
+    done = _run_child(cmd, input=json.dumps(request), timeout=_timeout_s(), env=env)
     lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
     payload = None
     if lines:

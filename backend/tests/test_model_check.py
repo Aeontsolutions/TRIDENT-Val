@@ -1,6 +1,7 @@
 """Model-estimate router tests: a mini app mounts only the model-check router against a 3-row NDJSON fixture.
 The registry fetch and the scorer runner are faked; no network and no subprocess."""
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -358,7 +359,7 @@ def real_runner(monkeypatch, tmp_path):
                 raise completed
             return completed
 
-        monkeypatch.setattr(model_check.subprocess, "run", fake_run)
+        monkeypatch.setattr(model_check, "_run_child", fake_run)
         return calls
 
     return install, tmp_path
@@ -430,3 +431,23 @@ def test_real_runner_missing_monorepo(monkeypatch, tmp_path):
 def test_default_root_is_the_enclosing_monorepo(monkeypatch):
     monkeypatch.delenv("MODEL_CHECK_ATS_AVM_ROOT", raising=False)
     assert model_check._ats_avm_root() == Path(model_check.__file__).resolve().parents[4]
+
+
+def test_run_child_timeout_kills_grandchildren_and_returns_promptly():
+    """`uv run` starts python as a grandchild that inherits the pipes; a timeout must not wait for it."""
+    import sys
+    import time
+
+    grandchild = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)"
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        model_check._run_child([sys.executable, "-c", grandchild], input="", timeout=1, env=dict(os.environ))
+    assert time.monotonic() - started < 15
+
+
+def test_run_child_returns_completed_process():
+    import sys
+
+    done = model_check._run_child([sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"],
+                                  input="abc", timeout=30, env=dict(os.environ))
+    assert done.returncode == 0 and done.stdout.strip() == "ABC"
