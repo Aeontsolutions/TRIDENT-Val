@@ -163,7 +163,7 @@ function Result({ res, recordId }) {
           <div className="label mb-1">Warnings</div>
           {res.warnings.length === 0 ? <div className="text-xs text-inkmute">None.</div> : (
             <ul className="text-xs space-y-1.5 list-disc pl-4">
-              {res.warnings.map((w) => <li key={w.code}>{w.message}</li>)}
+              {res.warnings.map((w, idx) => <li key={`${idx}:${w.code}`}>{w.message}</li>)}
             </ul>
           )}
         </div>
@@ -205,10 +205,10 @@ export default function ModelEstimate({ recordId, askingAmount, currency }) {
   }
 
   const aliases = reg?.aliases || {}
-  const aliasNames = [...new Set([...SLOTS, ...Object.keys(aliases)])]
   const options = (slot) => (
     <>
-      {aliasNames.map((a) => <option key={`a-${a}`} value={a}>{a} (alias{aliases[a] ? ` → v${aliases[a]}` : reg ? ', not set' : ''})</option>)}
+      {/* Until /versions answers (or if it fails), fall back to this slot's default alias only. */}
+      {(reg ? [...new Set([...SLOTS, ...Object.keys(aliases)])] : [slot]).map((a) => <option key={`a-${a}`} value={a}>{a} (alias{aliases[a] ? ` → v${aliases[a]}` : reg ? ', not set' : ''})</option>)}
       {(reg?.versions || []).map((v) => (
         <option key={v.version} value={v.version}>v{v.version}{v.aliases.length ? ` (${v.aliases.join(', ')})` : ''}</option>
       ))}
@@ -232,7 +232,7 @@ export default function ModelEstimate({ recordId, askingAmount, currency }) {
                 </select>
               </label>
             ))}
-            <button onClick={score} disabled={busy || !!regErr}
+            <button onClick={score} disabled={busy}
               className="px-3 py-1 bg-teal text-white rounded-sm disabled:opacity-50">Score this listing</button>
           </div>
         )}
