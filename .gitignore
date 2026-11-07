@@ -13,3 +13,6 @@ nohup.out
 
 # local copies of the listings NDJSON batches
 /listings/
+
+# scorer page cache (stored listing pages read from GCS)
+.cache/
