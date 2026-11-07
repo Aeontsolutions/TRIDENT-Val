@@ -65,3 +65,35 @@ def test_blocking_flags():
     joined = {"bedrooms_implausible": True, "unknown_label": False, "fx_rate_missing": None}
     assert blocking_flags(joined) == ["bedrooms_implausible"]
     assert len(CLEAN_FLAG_COLUMNS) == 8
+
+
+def _raw_row(**overrides):
+    return row_from_raw(
+        {**RAW, **overrides}, None, None, {}, ["property_type", "parish", "community"]
+    )
+
+
+def test_community_title_case_matches_training():
+    assert _raw_row(community="st. ann's BAY")["community"] == "St. Ann's Bay"
+    assert _raw_row(community="MONT-CLARE")["community"] == "Mont-clare"
+    assert _raw_row(community="2ND avenue")["community"] == "2nd Avenue"
+    assert _raw_row(community="   ")["community"] is None
+
+
+def test_parish_maps_to_canonical_label():
+    assert _raw_row(parish_raw="Kingston and St. Andrew")["parish"] == "Kingston & St. Andrew"
+    assert _raw_row(parish_raw="st ann")["parish"] == "St. Ann"
+    assert _raw_row(parish_raw="MANCHESTER")["parish"] == "Manchester"
+
+
+def test_unknown_parish_is_none():
+    assert _raw_row(parish_raw="Atlantis")["parish"] is None
+    assert _raw_row(parish_raw=None)["parish"] is None
+
+
+def test_property_type_only_house_apartment_townhouse():
+    assert _raw_row(property_type_raw="House")["property_type"] == "house"
+    assert _raw_row(property_type_raw=" Townhouse ")["property_type"] == "townhouse"
+    assert _raw_row(property_type_raw="Residential Lot")["property_type"] is None
+    assert _raw_row(property_type_raw="Hotel")["property_type"] is None
+    assert _raw_row(property_type_raw=None)["property_type"] is None

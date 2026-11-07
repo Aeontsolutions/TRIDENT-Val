@@ -46,25 +46,66 @@ def _float_or_none(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
-def _clean_text(value: Any) -> str | None:
-    value = _clean(value)
-    if value is None:
+# Copied from packages/avm_features/src/avm_features/listing_rules.py (cleaning_version listing-clean-v1):
+# PROPERTY_TYPE_MAP, CANONICAL_PARISHES, _text, _parish_key and _title_case. They must be kept in step with it,
+# because this module is tested without avm_features and the row has to be built the way training builds it.
+PROPERTY_TYPE_MAP = {
+    "House": "house",
+    "Apartment": "apartment",
+    "Townhouse": "townhouse",
+}
+
+CANONICAL_PARISHES = [
+    "Kingston & St. Andrew",
+    "St. Ann",
+    "St. James",
+    "St. Mary",
+    "St. Catherine",
+    "Manchester",
+    "Trelawny",
+    "Westmoreland",
+    "St. Thomas",
+    "Clarendon",
+    "St. Elizabeth",
+    "Hanover",
+    "Portland",
+]
+
+
+def _text(value: Any) -> str | None:
+    """A string with its whitespace trimmed and collapsed; None for a missing or blank value."""
+    if not isinstance(value, str):
         return None
-    return " ".join(str(value).split()).title() or None
+    return " ".join(value.split()) or None
+
+
+def _parish_key(value: Any) -> str | None:
+    """Spelling-insensitive key: case, full stops and whitespace ignored, 'and' read as '&'."""
+    text = _text(value)
+    if text is None:
+        return None
+    return " ".join(text.lower().replace(".", " ").replace(" and ", " & ").split())
+
+
+_PARISH_BY_KEY = {_parish_key(p): p for p in CANONICAL_PARISHES}
+
+
+def _title_case(value: Any) -> str | None:
+    text = _text(value)
+    return None if text is None else " ".join(w[:1].upper() + w[1:].lower() for w in text.split(" "))
 
 
 def _raw_base(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Raw listing keys mapped onto listing_clean column names and units."""
-    property_type = _clean(raw.get("property_type_raw"))
     unit = _clean(raw.get("floor_area_unit"))
     sqft = unit is not None and str(unit).strip().lower() == "sqft"
     return {
-        "property_type": None if property_type is None else str(property_type).strip().lower(),
+        "property_type": PROPERTY_TYPE_MAP.get(_text(raw.get("property_type_raw"))),
         "bedrooms": _clean(raw.get("bedrooms")),
         "bathrooms": _clean(raw.get("bathrooms")),
         "floor_area_sqft": _float_or_none(raw.get("floor_area")) if sqft else None,
-        "parish": _clean(raw.get("parish_raw")),
-        "community": _clean_text(raw.get("community")),
+        "parish": _PARISH_BY_KEY.get(_parish_key(raw.get("parish_raw"))),
+        "community": _title_case(raw.get("community")),
         "latitude": _clean(raw.get("latitude")),
         "longitude": _clean(raw.get("longitude")),
     }
