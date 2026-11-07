@@ -39,6 +39,37 @@ def flagged_fields(inputs: dict[str, object]) -> dict[str, str]:
     return {field: "outlier" for field, _ in _out_of_range(inputs)}
 
 
+# Copied from packages/avm_model/src/avm_model/prototype/columns.py (SPATIAL + GEO): the model inputs computed from the
+# coordinates. Keep in step with it.
+LOCATION_FEATURE_COLUMNS: tuple[str, ...] = (
+    # SPATIAL
+    "dist_nearest_town_m",
+    "nearest_town_name",
+    "n_school_500m",
+    "n_school_1km",
+    "dist_nearest_school_m",
+    "n_church_500m",
+    "n_church_1km",
+    "dist_nearest_church_m",
+    "dist_nearest_hospital_m",
+    "n_supermarket_1km",
+    "dist_nearest_supermarket_m",
+    # GEO
+    "dist_coast_m",
+    "elevation_m",
+    "slope_deg",
+    "road_km_500m",
+    "road_km_1km",
+)
+
+
 def geo_missing(inputs: dict[str, object]) -> bool:
     """True when latitude or longitude is missing."""
     return inputs.get("latitude") is None or inputs.get("longitude") is None
+
+
+def location_features_missing(inputs: dict[str, object]) -> bool:
+    """True when the coordinates are present but every location feature (distances, counts, elevation, roads) is missing."""
+    if geo_missing(inputs):
+        return False
+    return all(inputs.get(col) is None for col in LOCATION_FEATURE_COLUMNS)

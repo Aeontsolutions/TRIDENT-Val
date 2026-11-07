@@ -38,7 +38,7 @@ Credentials (`gcloud auth application-default login`); the project is `ats-avm-j
 # frontend (from frontend/); if the backend is on another port: API_URL=http://localhost:8001 npm run dev
 npm run dev
 
-cd backend && ../.venv/Scripts/python -m pytest tests     # 91 tests; run after backend changes
+cd backend && ../.venv/Scripts/python -m pytest tests     # run after backend changes
 cd frontend && npx vite build --outDir <somewhere outside the repo>    # catches broken imports
 uvx ruff check --select F401,F821,F841 backend/app scripts            # undefined and unused names
 ```

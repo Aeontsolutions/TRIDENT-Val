@@ -20,16 +20,17 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
+from scorer.input_row import PROPERTY_TYPE_MAP, _text
 
 from . import listings
 from .auth import get_current_user
-from .model_limits import flagged_fields, geo_missing, input_warnings
+from .model_limits import flagged_fields, geo_missing, input_warnings, location_features_missing
 
 router = APIRouter(prefix="/api/v1/model-check", tags=["model-check"], dependencies=[Depends(get_current_user)])
 
 MODEL_NAME = "avm_listing_price"
 SLOT_NAMES = ("champion", "challenger")
-SUPPORTED_TYPES = {"house", "apartment", "townhouse"}
+IN_SCOPE_LISTING_TYPE = "For Sale"  # as in avm_features listing_rules
 UNSUPPORTED_MESSAGE = "Model estimates cover for-sale houses, apartments and townhouses only"
 PROXY_HINT = "gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000"
 SCORER_PATH = Path(__file__).resolve().parent.parent / "scorer" / "score_listing.py"
@@ -55,10 +56,10 @@ class ScorerError(Exception):
 # ---------- pure helpers ----------
 
 def is_supported(record: dict) -> tuple[bool, str | None]:
-    """The model covers for-sale houses, apartments and townhouses."""
+    """The model covers for-sale houses, apartments and townhouses. Same exact match as training: whitespace is
+    trimmed and collapsed, case is not folded."""
     listing_type = record.get("listing_type_raw")
-    property_type = str(record.get("property_type_raw") or "").strip().lower()
-    if listing_type == "For Sale" and property_type in SUPPORTED_TYPES:
+    if _text(listing_type) == IN_SCOPE_LISTING_TYPE and _text(record.get("property_type_raw")) in PROPERTY_TYPE_MAP:
         return True, None
     return False, (f"{UNSUPPORTED_MESSAGE} (this listing is {listing_type or 'of unknown type'} / "
                    f"{record.get('property_type_raw') or 'unknown property type'}).")
@@ -72,6 +73,18 @@ def asking_jmd(amount: float | None, currency: str | None, fx_rate_used: float |
     if currency == "USD" and fx_rate_used:
         return amount * fx_rate_used
     return None
+
+
+def usd_rate(currency: str | None, clean: dict | None) -> tuple[float | None, bool]:
+    """(rate for converting a USD on-screen amount, whether the cleaned row disagrees about the currency).
+
+    listing_clean sets fx_rate_used = 1.0 for a JMD row, so the rate only applies when the cleaned row was priced in USD.
+    """
+    if currency != "USD" or clean is None:
+        return None, False
+    if clean.get("price_currency_original") == "USD":
+        return clean.get("fx_rate_used"), False
+    return None, True
 
 
 def gap_pct(estimate: float, asking: float | None) -> float | None:
@@ -192,7 +205,7 @@ def run_scorer(request: dict) -> dict:
     root = _ats_avm_root()
     if not (root / "packages" / "avm_model").is_dir():
         raise ScorerError("ATS AVM monorepo not found; set MODEL_CHECK_ATS_AVM_ROOT")
-    cmd = ["uv", "run", "--project", str(root), "--package", "avm_model", "--extra", "prototype",
+    cmd = ["uv", "run", "--frozen", "--project", str(root), "--package", "avm_model", "--extra", "prototype",
            "python", str(SCORER_PATH)]
     env = {k: v for k, v in os.environ.items() if k not in SCORER_ENV_DROP}
     env["MLFLOW_TRACKING_URI"] = _tracking_uri()
@@ -262,27 +275,38 @@ def _slot_out(scored: dict, asking: float | None) -> dict:
     return out
 
 
-def _warnings(result: dict, record_id: str, inputs: dict, slots: dict) -> list[dict]:
+def _warnings(result: dict, record_id: str, inputs: dict, slots: dict, currency: str | None) -> list[dict]:
     out: list[dict] = []
     clean = result.get("clean")
     if clean is None:
-        out.append({"code": "not_in_clean_table",
-                    "message": "This listing is not in the clean table; the inputs were built from the raw scrape."})
+        message = "This listing is not in the clean table; the inputs were built from the raw scrape."
+        if currency != "JMD":
+            message += (" There is no JMD asking price or gap, because the exchange rate comes from the cleaned "
+                        "table.")
+        out.append({"code": "not_in_clean_table", "message": message})
     else:
         if clean.get("record_id") not in (None, record_id):
             out.append({"code": "observation_differs",
                         "message": f"The clean table holds a different observation of this listing "
                                    f"({clean['record_id']}) than the one on screen ({record_id}); "
-                                   f"the estimate uses the inputs of {clean['record_id']}."})
+                                   f"the cleaned fields come from {clean['record_id']}, the page fields from the "
+                                   f"observation on screen."})
         if clean.get("trainable") is True:
             out.append({"code": "probably_in_training",
-                        "message": "This listing is in the clean table and marked trainable, so the model has "
-                                   "probably seen it; this is not an out-of-sample check."})
+                        "message": "This listing is in the clean table and marked trainable, so it was probably in "
+                                   "the training data (a share is held back as a locked test set, so it may not "
+                                   "have been); this is not an out-of-sample check."})
         elif clean.get("trainable") is False:
             flags = ", ".join(clean.get("blocking_flags") or []) or "none recorded"
             out.append({"code": "blocked_from_training",
                         "message": f"This listing is in the clean table but excluded from training "
                                    f"(blocking flags: {flags})."})
+    if usd_rate(currency, clean)[1]:
+        was = clean.get("price_currency_original")
+        out.append({"code": "currency_differs",
+                    "message": "The observation on screen is priced in USD but listing_clean's "
+                               + (f"is in {was}" if was else "has no original currency")
+                               + "; no JMD asking price or gap is shown."})
     out += [{"code": w["code"], "message": w["message"]} for w in input_warnings(inputs)]
     if any(s.get("status") == "ok" and s.get("floor_area_flagged") for s in slots.values()):
         out.append({"code": "floor_area_ignored",
@@ -290,10 +314,18 @@ def _warnings(result: dict, record_id: str, inputs: dict, slots: dict) -> list[d
     if geo_missing(inputs):
         out.append({"code": "geo_missing",
                     "message": "Latitude or longitude is missing, so location features are filled in as unknown."})
+    elif location_features_missing(inputs):
+        out.append({"code": "location_features_missing",
+                    "message": "Location features (distance to coast, elevation, nearby schools/roads ...) were not "
+                               "computed for this listing; the estimate leans on the other fields."})
     if result.get("page_error"):
         out.append({"code": "page_fields_unavailable",
                     "message": f"Fields read from the listing page were unavailable: {result['page_error']}"})
     return out
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def _scorer_failure_message(exc: Exception) -> str:
@@ -314,7 +346,7 @@ def score(body: ScoreRequest):
               "jmd": asking_jmd(item["amount"], item["currency"], None)}
     out: dict[str, Any] = {"supported": supported, "unsupported_reason": reason, "asking": asking,
                            "input_source": None, "clean": None, "inputs": [], "slots": {},
-                           "warnings": [], "registry_error": None}
+                           "warnings": [], "registry_error": None, "scored_at": _now_iso()}
     requested = {"champion": body.champion, "challenger": body.challenger}
     if not supported:
         out["slots"] = {name: {"status": "skipped"} for name in SLOT_NAMES}
@@ -347,7 +379,7 @@ def score(body: ScoreRequest):
 
     scored_slots = (result or {}).get("slots") or {}
     clean = (result or {}).get("clean")
-    fx = clean.get("fx_rate_used") if clean else None
+    fx, _ = usd_rate(item["currency"], clean)
     asking["jmd"] = asking_jmd(item["amount"], item["currency"], fx)
 
     slots: dict[str, dict] = {}
@@ -372,5 +404,6 @@ def score(body: ScoreRequest):
         out["input_source"] = result.get("input_source")
         out["clean"] = clean
         out["inputs"] = [{"name": k, "value": v, "flag": flags.get(k)} for k, v in inputs.items()]
-        out["warnings"] = _warnings(result, body.record_id, inputs, slots)
+        out["warnings"] = _warnings(result, body.record_id, inputs, slots, item["currency"])
+    out["scored_at"] = _now_iso()
     return out

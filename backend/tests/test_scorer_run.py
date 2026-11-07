@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from scorer.score_listing import Deps, _frame, run
+from scorer.score_listing import GEO_SPATIAL_SQL, Deps, _frame, run
 
 COLUMNS = ["property_type", "bedrooms", "pool", "dist_coast_m"]
 KEY = {"source_site_id": "cbjamaica.com", "site_listing_ref": "MLS-1"}
@@ -153,6 +153,19 @@ def test_clean_block_reports_blocking_flags():
     assert response["clean"]["trainable"] is False
     assert response["clean"]["record_id"] == "r1"
     assert response["clean"]["price_jmd"] == 30_000_000.0
+
+
+def test_clean_block_reports_the_original_currency():
+    response = run(request(), make_deps(joined={**JOINED, "price_currency_original": "USD", "fx_rate_used": 158.0}))
+    assert response["clean"]["price_currency_original"] == "USD"
+    assert response["clean"]["fx_rate_used"] == 158.0
+
+
+def test_geo_spatial_query_keeps_the_raw_coordinates():
+    """Training keeps listing_clean's coordinates; the fallback must not take the feature tables' copy instead."""
+    sql = GEO_SPATIAL_SQL.format(project="p", dataset="d", table="listing_geo_features")
+    assert "EXCEPT (source_site_id, site_listing_ref, latitude, longitude)" in sql
+    assert "`p.d.listing_geo_features`" in sql and "WHERE source_site_id = @s AND site_listing_ref = @r" in sql
 
 
 def test_frame_is_one_row_in_column_order():

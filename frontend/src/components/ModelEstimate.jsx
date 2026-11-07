@@ -110,9 +110,15 @@ function Result({ res, recordId }) {
   const shown = SLOTS.filter((n) => slots?.[n] && slots[n].status !== 'skipped')
   let askingNote = null
   if (asking.amount == null) askingNote = 'no asking price to compare'
-  else if (asking.jmd == null) askingNote = 'USD asking price: no JMD rate available for this listing, so no gap is shown'
+  else if (asking.jmd == null) {
+    askingNote = asking.currency
+      ? `${asking.currency} asking price: no JMD rate available for this listing, so no gap is shown`
+      : 'Asking currency unknown: no JMD price available for this listing, so no gap is shown'
+  }
   const layout = priceLineLayout(asking.jmd, slots)
   const labels = shown.filter((n) => slots[n].status === 'ok' && slots[n].label).map((n) => `${SLOT_LABEL[n].toLowerCase()} ${slots[n].label}`)
+  const scoredAt = res.scored_at && !Number.isNaN(Date.parse(res.scored_at)) ? new Date(res.scored_at).toLocaleString() : null
+  const scoredLine = [labels.length > 0 ? `from ${labels.join(' and ')}` : null, scoredAt ? `at ${scoredAt}` : null].filter(Boolean).join(' ')
   return (
     <div className="mt-3 space-y-3">
       {res.registry_error && (
@@ -170,7 +176,7 @@ function Result({ res, recordId }) {
       </div>
 
       <div className="text-[11px] text-inkmute">
-        Asking-price estimate, JMD.{labels.length > 0 && ` Scored from ${labels.join(' and ')}.`}
+        Asking-price estimate, JMD.{scoredLine && ` Scored ${scoredLine}.`}
       </div>
     </div>
   )

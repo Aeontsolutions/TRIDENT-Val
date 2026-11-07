@@ -74,15 +74,17 @@ The listings table is read-only; the one write path is reviewer bad-parse flags,
 The record inspector has a **Model estimate** section: pick a champion and a challenger model version
 and press **Score this listing** to see what the registered listing-price model (`avm_listing_price`)
 would say about that listing, next to the asking price. It is read-only: it reads the model registry,
-BigQuery and the stored listing page, and writes nothing.
+BigQuery and the stored listing page, and writes nothing to BigQuery, GCS or the registry (it caches the page and
+the model artifact locally).
 
 What it shows: the point estimate with its 90% range and the gap to the asking price for each slot, the
 exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as outliers), and warnings.
 
 - **Estimates are asking prices, in JMD.** The model is trained on asking prices, not sale prices.
 - **Not an out-of-sample test.** "Probably in training" means the listing's `listing_clean` row has
-  `trainable = true`. The locked test split is not reconstructed, so a listing that is not marked trainable
-  may still have been in it.
+  `trainable = true`. The locked test split is not reconstructed, so a trainable listing may have been held
+  back in that split and never trained on. A listing that is not marked trainable is in neither the training
+  set nor the test split.
 - **Listings in `listing_clean`** are scored from the clean row (the observation held there, which may not be
   the one on screen; a warning says so). The listing's stored page is read for the page fields (pool, views,
   gated security, lot size and so on), as in training. **Listings not in the clean table** are scored from the
@@ -95,6 +97,9 @@ exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as out
   artifact. A click takes roughly 15-40 s; a listing that is not in the clean table can take about a minute,
   because its page is downloaded and more BigQuery queries run. If the scorer exceeds `MODEL_CHECK_TIMEOUT_S`
   it is killed and the slots show an error.
+- **Known limitation: no model is kept in memory between clicks.** Each click starts a fresh scorer process,
+  so every click reloads the model (the artifact is cached on disk after the first download, but loading it
+  still takes time).
 
 ### Requirements
 

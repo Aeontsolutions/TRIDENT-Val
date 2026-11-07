@@ -27,6 +27,12 @@ if str(BACKEND_DIR) not in sys.path:
 from scorer.input_row import blocking_flags, row_from_joined, row_from_raw  # noqa: E402
 
 KEY_FIELDS = ("source_site_id", "site_listing_ref")
+# The geo and spatial tables repeat the key and the coordinates; training keeps listing_clean's copy of the
+# coordinates (avm_model.prototype.data.QUERY), so the fallback must not let these tables override the raw ones.
+GEO_SPATIAL_SQL = (
+    "SELECT * EXCEPT (source_site_id, site_listing_ref, latitude, longitude) FROM `{project}.{dataset}.{table}` "
+    "WHERE source_site_id = @s AND site_listing_ref = @r"
+)
 RESULT_FIELDS = (
     "pred_price_jmd",
     "lower_80_jmd",
@@ -86,6 +92,7 @@ def _clean_block(joined: dict) -> dict[str, Any]:
         "fetched_at": joined.get("fetched_at"),
         "trainable": joined.get("trainable"),
         "fx_rate_used": joined.get("fx_rate_used"),
+        "price_currency_original": joined.get("price_currency_original"),
         "price_jmd": joined.get("price_jmd"),
         "blocking_flags": blocking_flags(joined),
     }
@@ -179,8 +186,7 @@ def _real_deps() -> Deps:
         for table in ("listing_geo_features", "listing_spatial_features"):
             found.append(
                 select_one(
-                    f"SELECT * FROM `{data.PROJECT}.{data.DATASET}.{table}` "
-                    "WHERE source_site_id = @s AND site_listing_ref = @r",
+                    GEO_SPATIAL_SQL.format(project=data.PROJECT, dataset=data.DATASET, table=table),
                     site,
                     ref,
                 )

@@ -43,6 +43,7 @@ def scorer_response(**over):
             "fetched_at": "2026-10-13 10:00:00",
             "trainable": True,
             "fx_rate_used": 1.0,
+            "price_currency_original": "JMD",
             "price_jmd": 850_000_000.0,
             "blocking_flags": [],
         },
@@ -112,8 +113,13 @@ def test_requires_auth(monkeypatch):
 
 
 def test_is_supported():
-    for ptype in ("House", "Apartment", "Townhouse", "apartment"):
+    # Same exact match as training: whitespace is trimmed and collapsed, case is not folded.
+    for ptype in ("House", "Apartment", "Townhouse", " Apartment ", "House\n"):
         assert model_check.is_supported({"listing_type_raw": "For Sale", "property_type_raw": ptype}) == (True, None)
+    assert model_check.is_supported({"listing_type_raw": " For  Sale ", "property_type_raw": "House"}) == (True, None)
+    for ptype in ("house", "APARTMENT", None):
+        assert not model_check.is_supported({"listing_type_raw": "For Sale", "property_type_raw": ptype})[0]
+    assert not model_check.is_supported({"listing_type_raw": "for sale", "property_type_raw": "House"})[0]
     ok, reason = model_check.is_supported({"listing_type_raw": "For Sale", "property_type_raw": "Land"})
     assert not ok and "for-sale houses, apartments and townhouses" in reason
     ok, reason = model_check.is_supported({"listing_type_raw": "For Rent", "property_type_raw": "House"})
@@ -187,6 +193,7 @@ def test_training_and_provenance_warnings(env):
     env["runner"] = FakeRunner(scorer_response(clean=clean))
     differs = next(w for w in score(env, "rec_apt").json()["warnings"] if w["code"] == "observation_differs")
     assert "rec_other" in differs["message"] and "rec_apt" in differs["message"]
+    assert "page fields from the observation on screen" in differs["message"]
 
 
 def test_floor_area_and_page_warnings(env):
@@ -198,12 +205,69 @@ def test_floor_area_and_page_warnings(env):
 
 
 def test_usd_listing_converted_with_clean_rate(env):
-    clean = scorer_response()["clean"] | {"record_id": "rec_house", "fx_rate_used": 160.0}
+    clean = scorer_response()["clean"] | {"record_id": "rec_house", "fx_rate_used": 160.0,
+                                          "price_currency_original": "USD"}
     env["runner"] = FakeRunner(scorer_response(clean=clean))
     body = score(env, "rec_house").json()
+    assert "currency_differs" not in {w["code"] for w in body["warnings"]}
     assert body["asking"]["jmd"] == 160_000_000.0
     assert body["asking"]["currency"] == "USD" and body["asking"]["amount"] == 1_000_000
     assert round(body["slots"]["champion"]["gap_pct"], 1) == round((612e6 / 160e6 - 1) * 100, 1)
+
+
+def test_usd_on_screen_but_jmd_in_clean_table_has_no_gap(env):
+    """listing_clean sets fx_rate_used = 1.0 for JMD rows; applying it to a USD amount would be wrong ~150x."""
+    clean = scorer_response()["clean"] | {"record_id": "rec_house", "fx_rate_used": 1.0,
+                                          "price_currency_original": "JMD"}
+    env["runner"] = FakeRunner(scorer_response(clean=clean))
+    body = score(env, "rec_house").json()
+    assert body["asking"]["currency"] == "USD" and body["asking"]["jmd"] is None
+    assert body["slots"]["champion"]["status"] == "ok" and body["slots"]["champion"]["gap_pct"] is None
+    differs = next(w for w in body["warnings"] if w["code"] == "currency_differs")
+    assert "priced in USD" in differs["message"] and "JMD" in differs["message"]
+
+
+def test_jmd_on_screen_is_used_as_is_whatever_the_clean_currency(env):
+    clean = scorer_response()["clean"] | {"fx_rate_used": 160.0, "price_currency_original": "USD"}
+    env["runner"] = FakeRunner(scorer_response(clean=clean))
+    body = score(env, "rec_apt").json()
+    assert body["asking"]["jmd"] == 850_000_000
+    assert round(body["slots"]["champion"]["gap_pct"], 1) == -28.0
+    assert "currency_differs" not in {w["code"] for w in body["warnings"]}
+
+
+def test_not_in_clean_table_message_mentions_missing_jmd_price_for_foreign_currency(env):
+    env["runner"] = FakeRunner(scorer_response(input_source="raw_fallback", clean=None))
+    usd = next(w for w in score(env, "rec_house").json()["warnings"] if w["code"] == "not_in_clean_table")
+    assert "no JMD asking price or gap" in usd["message"]
+    jmd = next(w for w in score(env, "rec_apt").json()["warnings"] if w["code"] == "not_in_clean_table")
+    assert "no JMD asking price" not in jmd["message"]
+
+
+def test_location_features_missing_warning(env):
+    # the default inputs have coordinates but none of the location features
+    codes = {w["code"] for w in score(env, "rec_apt").json()["warnings"]}
+    assert "location_features_missing" in codes and "geo_missing" not in codes
+    warning = next(w for w in score(env, "rec_apt").json()["warnings"] if w["code"] == "location_features_missing")
+    assert "not computed" in warning["message"]
+
+    with_features = scorer_response(inputs={"latitude": 18.0, "longitude": -77.0, "dist_coast_m": 1200.0})
+    env["runner"] = FakeRunner(with_features)
+    assert "location_features_missing" not in {w["code"] for w in score(env, "rec_apt").json()["warnings"]}
+
+    no_coords = scorer_response(inputs={"latitude": None, "longitude": None})
+    env["runner"] = FakeRunner(no_coords)
+    codes = {w["code"] for w in score(env, "rec_apt").json()["warnings"]}
+    assert "geo_missing" in codes and "location_features_missing" not in codes
+
+
+def test_scored_at_is_a_utc_timestamp(env):
+    import datetime as dt
+
+    for record_id in ("rec_apt", "rec_land"):  # scored and unsupported
+        stamp = dt.datetime.fromisoformat(score(env, record_id).json()["scored_at"])
+        assert stamp.tzinfo is not None and stamp.utcoffset() == dt.timedelta(0)
+        assert abs((dt.datetime.now(dt.timezone.utc) - stamp).total_seconds()) < 60
 
 
 def test_usd_listing_without_rate_has_no_gap(env):
@@ -370,7 +434,7 @@ def test_real_runner_command_and_parse(real_runner):
     calls = install(Completed(0, 'chatter\n{"inputs": {"a": 1}, "slots": {}}\n'))
     assert model_check.run_scorer(REQUEST) == {"inputs": {"a": 1}, "slots": {}}
     cmd, kw = calls[0]
-    assert cmd[:2] == ["uv", "run"] and "--package" in cmd and "avm_model" in cmd and "--extra" in cmd
+    assert cmd[:3] == ["uv", "run", "--frozen"] and "--package" in cmd and "avm_model" in cmd and "--extra" in cmd
     assert cmd[cmd.index("--project") + 1] == str(root)
     assert cmd[-1].replace("\\", "/").endswith("backend/scorer/score_listing.py")
     assert json.loads(kw["input"]) == REQUEST
