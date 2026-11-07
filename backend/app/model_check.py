@@ -34,7 +34,7 @@ IN_SCOPE_LISTING_TYPE = "For Sale"  # as in avm_features listing_rules
 UNSUPPORTED_MESSAGE = "Model estimates cover for-sale houses, apartments and townhouses only"
 PROXY_HINT = "gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000"
 SCORER_PATH = Path(__file__).resolve().parent.parent / "scorer" / "score_listing.py"
-REGISTRY_TIMEOUT_S = 30  # the proxied registry has answered slowly now and then
+REGISTRY_TIMEOUT_S = 90  # a scaled-to-zero Cloud Run registry can take over a minute to cold-start
 KILL_DRAIN_TIMEOUT_S = 10  # how long to wait for the pipes to close after the scorer's process tree is killed
 # Set by the venv launcher that started this backend; inherited by `uv run`, they break the scorer's own Python.
 SCORER_ENV_DROP = ("PYTHONHOME", "PYTHONPATH", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")
@@ -112,6 +112,10 @@ def _tracking_uri() -> str:
 
 
 def _registry_down_message(reason: Any) -> str:
+    if isinstance(reason, httpx.TimeoutException):
+        return (f"Model registry at {_tracking_uri()} did not answer within {REGISTRY_TIMEOUT_S}s. The proxy is "
+                f"probably up but the Cloud Run instance behind it is cold-starting: retry in a minute. If it keeps "
+                f"timing out, check the proxy: {PROXY_HINT}")
     return (f"Model registry unreachable at {_tracking_uri()} ({reason}). "
             f"Open the proxy in another terminal: {PROXY_HINT}")
 

@@ -354,6 +354,15 @@ def test_versions_endpoint_unreachable_is_503(env):
     assert "gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000" in resp.json()["detail"]
 
 
+def test_versions_endpoint_timeout_is_503_with_cold_start_hint(env):
+    env["registry"] = model_check.httpx.ReadTimeout("timed out")
+    resp = env["client"].get("/api/v1/model-check/versions")
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert "cold-starting" in detail and "unreachable" not in detail
+    assert "gcloud run services proxy mlflow" in detail
+
+
 # ---- the real registry reader and subprocess runner, with their transports faked ----
 
 
@@ -394,7 +403,7 @@ def test_fetch_registry_maps_mlflow_payload(monkeypatch):
     assert [v["version"] for v in versions] == ["10", "2", "1"]
     assert versions[0]["aliases"] == ["challenger"] and versions[2]["aliases"] == ["champion"]
     assert versions[0]["created_at"].startswith("2025-11") or versions[0]["created_at"].startswith("2026-")
-    assert [c[2] for c in calls] == [model_check.REGISTRY_TIMEOUT_S] * 2 and model_check.REGISTRY_TIMEOUT_S == 30
+    assert [c[2] for c in calls] == [model_check.REGISTRY_TIMEOUT_S] * 2 and model_check.REGISTRY_TIMEOUT_S == 90
     assert calls[0][0] == "http://reg:5000/api/2.0/mlflow/model-versions/search"
     assert calls[0][1]["filter"] == "name='avm_listing_price'"
     assert calls[1][0] == "http://reg:5000/api/2.0/mlflow/registered-models/get"
