@@ -13,6 +13,12 @@ localhost.
 
 ## Quickstart
 
+One command does the setup below (venv, dependencies, `npm install`, demo users) and is safe to re-run:
+`python scripts/dev_setup.py` (add `--dump-listings` to also save the BigQuery table locally, see Listings source).
+Working on this with Claude Code? Read `CLAUDE.md` first.
+
+Manual steps:
+
 ```bash
 python -m venv .venv            # Python 3.12
 .venv/Scripts/pip install -r backend/requirements.txt     # macOS/Linux: .venv/bin/pip
@@ -92,5 +98,5 @@ backend/app/
   auth.py db.py models.py logging_config.py
 backend/tests/       listings tests and an NDJSON fixture
 frontend/src/        React + Tailwind views (Listings*, DataProfile, Login)
-scripts/             seed_users.py, generate_profile.py
+scripts/             dev_setup.py, seed_users.py, generate_profile.py
 ```
