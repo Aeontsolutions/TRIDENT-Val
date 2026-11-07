@@ -1,0 +1,89 @@
+"""Assemble one model input row from a ``listing_clean`` join or from raw listing fields.
+
+Plain dict code: no pandas and no ``avm_model`` import. The model's column list is
+passed in as ``columns``.
+"""
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+# Blocking flags from the listing_clean data dictionary.
+CLEAN_FLAG_COLUMNS: tuple[str, ...] = (
+    "price_missing_or_unparseable",
+    "currency_unsupported",
+    "fx_rate_missing",
+    "floor_area_implausible",
+    "bedrooms_implausible",
+    "bathrooms_implausible",
+    "price_per_sqft_extreme",
+    "unknown_label",
+)
+
+
+def _clean(value: Any) -> Any:
+    """NaN and pandas-style NA scalars become None."""
+    if value is None:
+        return None
+    try:
+        if value != value:  # NaN; pd.NA raises on bool() below
+            return None
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
+def row_from_joined(
+    joined: Mapping[str, Any], page: Mapping[str, Any], columns: Sequence[str]
+) -> dict[str, Any]:
+    """Page values win over the joined row; absent or NaN values are None."""
+    return {
+        col: _clean(page[col] if col in page else joined.get(col)) for col in columns
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    value = _clean(value)
+    return None if value is None else float(value)
+
+
+def _clean_text(value: Any) -> str | None:
+    value = _clean(value)
+    if value is None:
+        return None
+    return " ".join(str(value).split()).title() or None
+
+
+def _raw_base(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Raw listing keys mapped onto listing_clean column names and units."""
+    property_type = _clean(raw.get("property_type_raw"))
+    unit = _clean(raw.get("floor_area_unit"))
+    sqft = unit is not None and str(unit).strip().lower() == "sqft"
+    return {
+        "property_type": None if property_type is None else str(property_type).strip().lower(),
+        "bedrooms": _clean(raw.get("bedrooms")),
+        "bathrooms": _clean(raw.get("bathrooms")),
+        "floor_area_sqft": _float_or_none(raw.get("floor_area")) if sqft else None,
+        "parish": _clean(raw.get("parish_raw")),
+        "community": _clean_text(raw.get("community")),
+        "latitude": _clean(raw.get("latitude")),
+        "longitude": _clean(raw.get("longitude")),
+    }
+
+
+def row_from_raw(
+    raw: Mapping[str, Any],
+    geo: Mapping[str, Any] | None,
+    spatial: Mapping[str, Any] | None,
+    page: Mapping[str, Any],
+    columns: Sequence[str],
+) -> dict[str, Any]:
+    """Row for a listing that is not in listing_clean. Later sources win: raw, geo, spatial, page."""
+    merged: dict[str, Any] = {}
+    for source in (_raw_base(raw), geo or {}, spatial or {}, page):
+        merged.update(source)
+    return {col: _clean(merged.get(col)) for col in columns}
+
+
+def blocking_flags(joined: Mapping[str, Any]) -> list[str]:
+    """Names in CLEAN_FLAG_COLUMNS that are true."""
+    return [name for name in CLEAN_FLAG_COLUMNS if _clean(joined.get(name))]
