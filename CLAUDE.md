@@ -38,7 +38,7 @@ Credentials (`gcloud auth application-default login`); the project is `ats-avm-j
 # frontend (from frontend/); if the backend is on another port: API_URL=http://localhost:8001 npm run dev
 npm run dev
 
-cd backend && ../.venv/Scripts/python -m pytest tests     # 29 tests; run after backend changes
+cd backend && ../.venv/Scripts/python -m pytest tests     # 91 tests; run after backend changes
 cd frontend && npx vite build --outDir <somewhere outside the repo>    # catches broken imports
 uvx ruff check --select F401,F821,F841 backend/app scripts            # undefined and unused names
 ```
@@ -51,11 +51,20 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
   (`listing_flags`). Never write to BigQuery or GCS from here.
 - **`scripts/seed_users.py` must stay non-destructive.** It only creates missing tables and users.
   Do not reintroduce `drop_all`; it would wipe reviewers' flags.
-- **Do not add Ames, portfolio or governance code back.** If a model-check view is wanted, build it
-  against the real `avm_model` package (a cascade with conformal intervals and tiering), not the
-  old single-estimator `log1p(price)` shape.
-- **`backend/app/inference.py` is unused.** It is kept only as a starting point for a model-check
-  adapter. Nothing imports it; do not wire it in unchanged.
+- **Do not add Ames, portfolio or governance code back.** The model-check view is built against the real
+  `avm_model` package (a cascade with conformal intervals and tiering), not the old single-estimator
+  `log1p(price)` shape.
+- **The model-check adapter is `backend/app/model_check.py`** (router `/api/v1/model-check`; UI in
+  `frontend/src/components/ModelEstimate.jsx`). `backend/app/inference.py` is unused: it is the old Ames
+  code, nothing imports it, and it must not be wired in.
+- **The scorer must stay in the monorepo environment.** `backend/scorer/score_listing.py` runs as a
+  subprocess via `uv run --package avm_model --extra prototype` in the `ats_avm` checkout, because
+  `avm_model` pins `scikit-learn==1.9.1`. Never import `avm_model`, `mlflow` or `scikit-learn` models into the
+  explorer's venv or into `backend/app/`. Setup, env vars and requirements are in the README (Model estimate).
+- **`backend/scorer/input_row.py` holds copies of the training cleaning rules**
+  (`packages/avm_features/src/avm_features/listing_rules.py`, cleaning version `listing-clean-v1`:
+  `_title_case`, the parish map, the property-type map). Keep them in step with that file, or listings not
+  in `listing_clean` get inputs the model never saw in training.
 - **Data profiles** are written by `scripts/generate_profile.py` to `reports/data_profile/` and shown
   in the Admin-only Data Profile tab. They are static snapshots. See the README for usage.
 - **Line endings:** files are CRLF in the working tree on Windows (autocrlf). If you edit with

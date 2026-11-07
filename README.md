@@ -63,10 +63,60 @@ The listings table is read-only; the one write path is reviewer bad-parse flags,
   clusters of different MLS refs on identical coordinates).
 - **Run comparison**: how much the same listing recurs across scrape runs, and a field-level diff
   between any two runs.
-- **Record inspector**: raw vs parsed fields side by side, provenance, quality flags, images.
+- **Record inspector**: raw vs parsed fields side by side, provenance, quality flags, images, and a
+  Model estimate section (below).
 - **Bad-parse flags**: flag a raw-vs-parsed field (wrong value / not parsed / wrong unit / ...), list
   and filter flags, export them as CSV.
 - **Data Profile** (Admin): embeds ydata-profiling reports; see below.
+
+## Model estimate
+
+The record inspector has a **Model estimate** section: pick a champion and a challenger model version
+and press **Score this listing** to see what the registered listing-price model (`avm_listing_price`)
+would say about that listing, next to the asking price. It is read-only: it reads the model registry,
+BigQuery and the stored listing page, and writes nothing.
+
+What it shows: the point estimate with its 90% range and the gap to the asking price for each slot, the
+exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as outliers), and warnings.
+
+- **Estimates are asking prices, in JMD.** The model is trained on asking prices, not sale prices.
+- **Not an out-of-sample test.** "Probably in training" means the listing's `listing_clean` row has
+  `trainable = true`. The locked test split is not reconstructed, so a listing that is not marked trainable
+  may still have been in it.
+- **Listings in `listing_clean`** are scored from the clean row (the observation held there, which may not be
+  the one on screen; a warning says so). The listing's stored page is read for the page fields (pool, views,
+  gated security, lot size and so on), as in training. **Listings not in the clean table** are scored from the
+  raw explorer fields with a warning.
+- **Not scored:** listings that are not for sale, or whose property type is not house, apartment or townhouse.
+- **Slots.** Either slot takes any registered version, or an alias. The challenger slot defaults to the
+  registry alias `challenger`; none exists yet (only `champion` -> version 1), so by default it shows
+  "no challenger registered". Set the alias on a version in the registry, or pick a version number.
+- **It is slow.** Every click spawns the scorer. The first click for a model version downloads a ~44 MB
+  artifact. A click takes roughly 15-40 s; a listing that is not in the clean table can take about a minute,
+  because its page is downloaded and more BigQuery queries run. If the scorer exceeds `MODEL_CHECK_TIMEOUT_S`
+  it is killed and the slots show an error.
+
+### Requirements
+
+- `uv` on PATH. The scorer runs under the `ats_avm` monorepo environment
+  (`uv run --package avm_model --extra prototype`), because `avm_model` pins `scikit-learn==1.9.1`. It is a
+  separate process on purpose: do not install `avm_model` or `mlflow` in the explorer's venv.
+- The `ats_avm` monorepo checkout. By default it is two folders above `tools/trident-val` (the `ats_avm`
+  root); set `MODEL_CHECK_ATS_AVM_ROOT` otherwise. It must contain `packages/avm_model`.
+- The MLflow proxy running in another terminal (the registry is private):
+  `gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000`.
+- `gcloud auth application-default login` (BigQuery reads).
+- `gcloud` on PATH: the stored listing page is read with `gcloud storage cat`.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `MLFLOW_TRACKING_URI` | `http://localhost:5000` | The MLflow registry, normally the proxy above. Passed on to the scorer. |
+| `MODEL_CHECK_ATS_AVM_ROOT` | the `ats_avm` root, two folders above `tools/trident-val` | Monorepo checkout the scorer runs in. |
+| `MODEL_CHECK_TIMEOUT_S` | `180` | Seconds before a scorer run is killed (with its child processes) and reported as an error. |
+| `MODEL_CHECK_PAGES_DIR` | `<explorer>/.cache/pages` | Cache of stored listing pages read from GCS (git-ignored). |
+
+API: `GET /api/v1/model-check/versions` lists registered versions and aliases;
+`POST /api/v1/model-check/score` takes `{"record_id", "champion", "challenger"}`.
 
 ## Data profiles
 
@@ -94,9 +144,12 @@ backend/app/
   main.py            app, login/session, logs, data-profile routes
   listings.py        read-only listings explorer API
   listing_flags.py   bad-parse flags (the only write path)
-  inference.py       kept from the Ames demo as a starting point for a model-check adapter; unused by the app
+  model_check.py     Model estimate API (/api/v1/model-check): registry reads, runs the scorer subprocess
+  model_limits.py    input plausibility limits (bedrooms, bathrooms) and the flags shown in the UI
+  inference.py       kept from the Ames demo; unused by the app (model_check.py replaces it)
   auth.py db.py models.py logging_config.py
-backend/tests/       listings tests and an NDJSON fixture
+backend/scorer/      score_listing.py + input_row.py: run under the monorepo env, not this venv (see Model estimate)
+backend/tests/       listings and model-check tests, and an NDJSON fixture
 frontend/src/        React + Tailwind views (Listings*, DataProfile, Login)
 scripts/             dev_setup.py, seed_users.py, generate_profile.py
 ```
