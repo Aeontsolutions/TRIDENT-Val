@@ -34,6 +34,7 @@ UNSUPPORTED_MESSAGE = "Model estimates cover for-sale houses, apartments and tow
 PROXY_HINT = "gcloud run services proxy mlflow --project ats-avm-jam --region us-central1 --port 5000"
 SCORER_PATH = Path(__file__).resolve().parent.parent / "scorer" / "score_listing.py"
 REGISTRY_TIMEOUT_S = 30  # the proxied registry has answered slowly now and then
+KILL_DRAIN_TIMEOUT_S = 10  # how long to wait for the pipes to close after the scorer's process tree is killed
 # Set by the venv launcher that started this backend; inherited by `uv run`, they break the scorer's own Python.
 SCORER_ENV_DROP = ("PYTHONHOME", "PYTHONPATH", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")
 RESULT_FIELDS = (
@@ -166,16 +167,17 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def _run_child(cmd: list[str], *, input: str, timeout: float, env: dict) -> subprocess.CompletedProcess:
-    """subprocess.run(..., capture_output=True, timeout=...) that kills the whole process tree on timeout."""
+    """subprocess.run(..., capture_output=True, timeout=...) that kills the whole process tree on any exception
+    (timeout, KeyboardInterrupt, a cancelled worker) and then re-raises it unchanged."""
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             encoding="utf-8", env=env, start_new_session=os.name != "nt")
     try:
         stdout, stderr = proc.communicate(input, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except BaseException:
         _kill_tree(proc)
         try:
-            proc.communicate(timeout=10)  # reap the child and close the pipes
-        except subprocess.TimeoutExpired:
+            proc.communicate(timeout=KILL_DRAIN_TIMEOUT_S)  # reap the child and close the pipes
+        except Exception:  # noqa: BLE001 - best effort; the original exception is what the caller needs
             pass
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)

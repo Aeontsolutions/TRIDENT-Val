@@ -433,16 +433,84 @@ def test_default_root_is_the_enclosing_monorepo(monkeypatch):
     assert model_check._ats_avm_root() == Path(model_check.__file__).resolve().parents[4]
 
 
-def test_run_child_timeout_kills_grandchildren_and_returns_promptly():
-    """`uv run` starts python as a grandchild that inherits the pipes; a timeout must not wait for it."""
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":  # os.kill(pid, 0) would terminate the process on Windows
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out.split()
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _force_kill(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+def test_run_child_timeout_kills_grandchildren_and_returns_promptly(monkeypatch, tmp_path):
+    """`uv run` starts python as a grandchild that inherits the pipes. The timeout must kill it; if only the direct
+    child died, the pipes would stay open and the call would wait out the whole drain period."""
     import sys
     import time
 
-    grandchild = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)"
-    started = time.monotonic()
-    with pytest.raises(subprocess.TimeoutExpired):
-        model_check._run_child([sys.executable, "-c", grandchild], input="", timeout=1, env=dict(os.environ))
-    assert time.monotonic() - started < 15
+    monkeypatch.setattr(model_check, "KILL_DRAIN_TIMEOUT_S", 6)
+    pid_file = tmp_path / "grandchild.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "open(sys.argv[1], 'w').write(str(g.pid))\n"
+        "time.sleep(60)\n"
+    )
+    grandchild_pid = None
+    try:
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            model_check._run_child([sys.executable, "-c", script, str(pid_file)], input="", timeout=2,
+                                   env=dict(os.environ))
+        elapsed = time.monotonic() - started
+        assert pid_file.exists(), "test setup: the grandchild never started"
+        grandchild_pid = int(pid_file.read_text())
+        # Killed tree: about the 2 s timeout. Only the direct child killed: 2 s + the 6 s drain.
+        assert elapsed < 5
+        for _ in range(30):  # taskkill / SIGKILL take a moment to land
+            if not _pid_alive(grandchild_pid):
+                break
+            time.sleep(0.1)
+        assert not _pid_alive(grandchild_pid)
+    finally:
+        if grandchild_pid is None and pid_file.exists():
+            grandchild_pid = int(pid_file.read_text())
+        if grandchild_pid is not None and _pid_alive(grandchild_pid):
+            _force_kill(grandchild_pid)
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("worker cancelled"), KeyboardInterrupt()])
+def test_run_child_kills_the_tree_on_any_exception_and_reraises_it(monkeypatch, exc):
+    events = []
+
+    class FakeProc:
+        pid = 4242
+
+        def communicate(self, input=None, timeout=None):
+            events.append(("communicate", timeout))
+            if len(events) == 1:
+                raise exc
+            return "", ""
+
+    monkeypatch.setattr(model_check.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    monkeypatch.setattr(model_check, "_kill_tree", lambda proc: events.append(("kill", proc.pid)))
+    with pytest.raises(type(exc)) as caught:
+        model_check._run_child(["uv"], input="{}", timeout=5, env={})
+    assert caught.value is exc
+    assert [e[0] for e in events] == ["communicate", "kill", "communicate"]  # killed, then reaped
+    assert events[1] == ("kill", 4242)
 
 
 def test_run_child_returns_completed_process():
