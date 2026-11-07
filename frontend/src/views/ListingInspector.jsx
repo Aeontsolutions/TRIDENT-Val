@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { Carousel, FALLBACK_IMG, Spinner } from '../components/shared.jsx'
 import { fmtPrice } from '../components/ListingsShell.jsx'
 import { REASON_LABEL } from './ListingsFlags.jsx'
+import ModelEstimate from '../components/ModelEstimate.jsx'
 
 const statusStyle = {
   parsed: 'bg-ok/10 text-ok border-ok/30',
@@ -98,6 +99,8 @@ export default function ListingInspector({ recordId, onBack, user, onOpen }) {
           {p.canonical_url && p.canonical_url !== p.listing_url && <span>Canonical: <Link href={p.canonical_url} /></span>}
         </div>
       </div>
+
+      <ModelEstimate recordId={recordId} askingAmount={s.amount} currency={s.currency} />
 
       <div className="grid lg:grid-cols-3 gap-4 items-start">
         <div className="card p-5 lg:col-span-2">

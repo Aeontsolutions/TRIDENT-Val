@@ -68,6 +68,8 @@ export const api = {
   resolveListingFlag: (id, resolution_note) =>
     send('PATCH', `/listings/flags/${id}/resolve`, { resolution_note }, 'resolving the flag failed'),
   deleteListingFlag: (id) => send('DELETE', `/listings/flags/${id}`, {}, 'deleting the flag failed'),
+  modelVersions: () => get('/model-check/versions'),
+  scoreListing: (body) => send('POST', '/model-check/score', body, 'scoring failed'),
   listingFlagsExportUrl: (params = {}) => `${BASE}/listings/flags/export.csv?${new URLSearchParams(params)}`,
 }
 
