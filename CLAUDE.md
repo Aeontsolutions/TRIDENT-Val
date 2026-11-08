@@ -58,7 +58,8 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
   `frontend/src/components/ModelEstimate.jsx`). `backend/app/inference.py` is unused: it is the old Ames
   code, nothing imports it, and it must not be wired in.
 - **The scorer must stay in the monorepo environment.** `backend/scorer/score_listing.py` runs as a
-  subprocess via `uv run --package avm_model --extra prototype` in the `ats_avm` checkout, because
+  subprocess via `uv run --package avm_model --extra <MODEL_CHECK_EXTRA, default prototype>` in the `ats_avm`
+  checkout (`tabpfn` for the TabPFN challenger, which needs a `dev_elroy` checkout; see the README), because
   `avm_model` pins `scikit-learn==1.9.1`. Never import `avm_model`, `mlflow` or `scikit-learn` models into the
   explorer's venv or into `backend/app/`. Setup, env vars and requirements are in the README (Model estimate).
 - **`backend/scorer/input_row.py` holds copies of the training cleaning rules**

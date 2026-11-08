@@ -91,12 +91,21 @@ exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as out
   raw explorer fields with a warning.
 - **Not scored:** listings that are not for sale, or whose property type is not house, apartment or townhouse.
 - **Slots.** Either slot takes any registered version, or an alias. The challenger slot defaults to the
-  registry alias `challenger`; none exists yet (only `champion` -> version 1), so by default it shows
-  "no challenger registered". Set the alias on a version in the registry, or pick a version number.
-- **It is slow.** Every click spawns the scorer. The first click for a model version downloads a ~44 MB
-  artifact. A click takes roughly 15-40 s; a listing that is not in the clean table can take about a minute,
-  because its page is downloaded and more BigQuery queries run. If the scorer exceeds `MODEL_CHECK_TIMEOUT_S`
-  it is killed and the slots show an error.
+  registry alias `challenger` (version 2, the TabPFN mix; `champion` is version 1). If an alias is missing the
+  slot shows "no challenger registered": set the alias on a version in the registry, or pick a version number.
+- **The TabPFN challenger needs extra setup.** Its model imports `tabpfn` (PyTorch, CPU), which only the
+  `tabpfn` extra of `avm_model` provides, and only `dev_elroy` has that extra. Run the backend with
+  `MODEL_CHECK_ATS_AVM_ROOT` set to a `dev_elroy` checkout, `MODEL_CHECK_EXTRA=tabpfn`, `TABPFN_TOKEN` set and
+  `MODEL_CHECK_TIMEOUT_S=900`. Run `uv sync --frozen --package avm_model --extra tabpfn` in that checkout first so the
+  install does not use up the timeout. Without it the challenger slot shows `No module named 'tabpfn'`. The
+  champion needs none of this.
+- **It is slow.** Every click spawns the scorer. The first click for a model version downloads its artifact
+  (~44 MB for the champion). A champion click takes roughly 15-40 s; a listing that is not in the clean table can
+  take about a minute, because its page is downloaded and more BigQuery queries run. The first TabPFN click
+  also downloads about 835 MB of weights and then runs on the CPU: about 10 minutes the first time. If the
+  scorer exceeds `MODEL_CHECK_TIMEOUT_S` it is killed and the slots show an error.
+- **`The scorer exited with code 3221225794`** (Windows `0xC0000142`) with no other detail, while the same scorer
+  command works in a shell: restart the backend. Seen once on a long-running backend; cause not found.
 - **Known limitation: no model is kept in memory between clicks.** Each click starts a fresh scorer process,
   so every click reloads the model (the artifact is cached on disk after the first download, but loading it
   still takes time).
