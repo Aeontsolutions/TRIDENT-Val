@@ -5,7 +5,8 @@ Read only. Registry reads go to the MLflow tracking server over HTTP; scoring ru
 This module runs in the explorer's venv and must not import ``avm_model``, ``mlflow`` or anything from the monorepo.
 
 Env: ``MLFLOW_TRACKING_URI`` (default http://localhost:5000), ``MODEL_CHECK_ATS_AVM_ROOT`` (default: the ``ats_avm``
-checkout that holds this submodule; must contain ``packages/avm_model``), ``MODEL_CHECK_TIMEOUT_S`` (default 180).
+checkout that holds this submodule; must contain ``packages/avm_model``), ``MODEL_CHECK_TIMEOUT_S`` (default 180),
+``MODEL_CHECK_EXTRA`` (default ``prototype``; ``tabpfn`` also installs TabPFN so the TabPFN challenger can be scored).
 """
 import datetime as dt
 import json
@@ -158,6 +159,10 @@ def _ats_avm_root() -> Path:
     return Path(env) if env else Path(__file__).resolve().parents[4]
 
 
+def _scorer_extra() -> str:
+    return (os.environ.get("MODEL_CHECK_EXTRA") or "").strip() or "prototype"
+
+
 def _timeout_s() -> float:
     try:
         return float(os.environ.get("MODEL_CHECK_TIMEOUT_S") or 180)
@@ -209,7 +214,7 @@ def run_scorer(request: dict) -> dict:
     root = _ats_avm_root()
     if not (root / "packages" / "avm_model").is_dir():
         raise ScorerError("ATS AVM monorepo not found; set MODEL_CHECK_ATS_AVM_ROOT")
-    cmd = ["uv", "run", "--frozen", "--project", str(root), "--package", "avm_model", "--extra", "prototype",
+    cmd = ["uv", "run", "--frozen", "--project", str(root), "--package", "avm_model", "--extra", _scorer_extra(),
            "python", str(SCORER_PATH)]
     env = {k: v for k, v in os.environ.items() if k not in SCORER_ENV_DROP}
     env["MLFLOW_TRACKING_URI"] = _tracking_uri()

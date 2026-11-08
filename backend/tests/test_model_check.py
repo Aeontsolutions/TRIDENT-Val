@@ -444,6 +444,7 @@ def test_real_runner_command_and_parse(real_runner):
     assert model_check.run_scorer(REQUEST) == {"inputs": {"a": 1}, "slots": {}}
     cmd, kw = calls[0]
     assert cmd[:3] == ["uv", "run", "--frozen"] and "--package" in cmd and "avm_model" in cmd and "--extra" in cmd
+    assert cmd[cmd.index("--extra") + 1] == "prototype"
     assert cmd[cmd.index("--project") + 1] == str(root)
     assert cmd[-1].replace("\\", "/").endswith("backend/scorer/score_listing.py")
     assert json.loads(kw["input"]) == REQUEST

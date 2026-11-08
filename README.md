@@ -117,6 +117,7 @@ exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as out
 |---|---|---|
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | The MLflow registry, normally the proxy above. Passed on to the scorer. |
 | `MODEL_CHECK_ATS_AVM_ROOT` | the `ats_avm` root, two folders above `tools/trident-val` | Monorepo checkout the scorer runs in. |
+| `MODEL_CHECK_EXTRA` | `prototype` | `avm_model` extra the scorer installs. Set `tabpfn` to score the TabPFN challenger. That needs PyTorch, a `tabpfn` extra in the `MODEL_CHECK_ATS_AVM_ROOT` checkout (`dev_elroy` has it), and `TABPFN_TOKEN` in the backend's environment. The first run downloads the weights, so raise `MODEL_CHECK_TIMEOUT_S`. |
 | `MODEL_CHECK_TIMEOUT_S` | `180` | Seconds before a scorer run is killed (with its child processes) and reported as an error. |
 | `MODEL_CHECK_PAGES_DIR` | `<explorer>/.cache/pages` | Cache of stored listing pages read from GCS (git-ignored). |
 
