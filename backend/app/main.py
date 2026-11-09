@@ -16,7 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv()  # picks up a repo-root .env for local (non-Docker) runs; no-op if absent
 
-from . import listing_flags, listings, model_check
+from . import listing_flags, listings, model_batch, model_check, scorer_client
 from .auth import DUMMY_PASSWORD_HASH, get_current_user, require_role, verify_password
 from .db import Base, engine, get_db
 from .logging_config import setup_logging
@@ -29,6 +29,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 app.include_router(listing_flags.router)  # bad-parse flags (app DB only); before listings' /{record_id}
 app.include_router(listings.router)  # read-only scraped-listings explorer (BigQuery / NDJSON)
 app.include_router(model_check.router)  # model estimate for one listing (registry reads + scorer subprocess)
+app.include_router(model_batch.router)  # model estimate for every new listing of the latest scrape run
 
 # Signed-cookie session for the PoC login (see app.auth). The frontend never calls the
 # backend cross-origin (Vite/nginx both proxy /api same-origin), so a plain cookie
@@ -50,6 +51,11 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, max_age=60 * 60
 def log_startup():
     Base.metadata.create_all(bind=engine)  # idempotent: only creates system_logs on existing DBs
     logger.info("TRIDENT-Val backend starting up (version {v})", v=app.version)
+
+
+@app.on_event("shutdown")
+def stop_scorers():
+    scorer_client.shutdown_all()  # the long-lived model-check scorer processes must not outlive the backend
 
 
 @app.middleware("http")

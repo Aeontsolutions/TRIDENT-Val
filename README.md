@@ -67,6 +67,8 @@ The listings table is read-only; the one write path is reviewer bad-parse flags,
   Model estimate section (below).
 - **Bad-parse flags**: flag a raw-vs-parsed field (wrong value / not parsed / wrong unit / ...), list
   and filter flags, export them as CSV.
+- **Model batch**: scores every new listing of the latest scrape run with the champion and the challenger and lists the
+  biggest gaps to asking first; see Model batch below.
 - **Data Profile** (Admin): embeds ydata-profiling reports; see below.
 
 ## Model estimate
@@ -99,16 +101,22 @@ exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as out
   `MODEL_CHECK_TIMEOUT_S=900`. Run `uv sync --frozen --package avm_model --extra tabpfn` in that checkout first so the
   install does not use up the timeout. Without it the challenger slot shows `No module named 'tabpfn'`. The
   champion needs none of this.
-- **It is slow.** Every click spawns the scorer. The first click for a model version downloads its artifact
-  (~44 MB for the champion). A champion click takes roughly 15-40 s; a listing that is not in the clean table can
-  take about a minute, because its page is downloaded and more BigQuery queries run. The first TabPFN click
-  also downloads about 835 MB of weights and then runs on the CPU: about 10 minutes the first time. If the
-  scorer exceeds `MODEL_CHECK_TIMEOUT_S` it is killed and the slots show an error.
+- **Speed.** The scorer is a long-lived process per slot (`backend/scorer/serve.py`, one for the champion and one for
+  the challenger), so the models stay loaded between clicks. Opening a listing starts the champion's process and loads
+  the model in the background (`POST /model-check/warm`, about a minute the first time after the backend starts).
+  After that a champion click takes about 2.5-7 s: the BigQuery lookups and, for a page not seen before, one GCS
+  download. The registry read is cached for a minute. Before this, every click started a fresh process and took
+  about a minute (imports 8 s, model load 24-34 s, page download 8 s, lookups 5 s; the prediction itself 0.2 s).
+- **The challenger is slow, and that is TabPFN, not the process.** TabPFN on a CPU needs about 3 minutes for any
+  request (184 s for one row, 191 s for 20, 200 s for 200, 236 s for 1,000) after about a minute to load its weights.
+  So the panel scores the champion first and shows it at once, then scores the challenger as a second request: that
+  row shows "Scoring…" with a timer and fills in when TabPFN finishes. Clicking another listing does not cancel
+  it; the challenger process works through requests one at a time, so a second challenger click waits for the first.
+  If a request exceeds its timeout the process is killed (so the models load again next time) and the slot shows an
+  error. The first TabPFN use also downloads about 835 MB of weights.
 - **`The scorer exited with code 3221225794`** (Windows `0xC0000142`) with no other detail, while the same scorer
-  command works in a shell: restart the backend. Seen once on a long-running backend; cause not found.
-- **Known limitation: no model is kept in memory between clicks.** Each click starts a fresh scorer process,
-  so every click reloads the model (the artifact is cached on disk after the first download, but loading it
-  still takes time).
+  command works in a shell: restart the backend. Seen once on a long-running backend (before the scorer became
+  long-lived); cause not found. `MODEL_CHECK_SCORER_MODE=oneshot` goes back to one process per click.
 
 ### Requirements
 
@@ -127,11 +135,42 @@ exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as out
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | The MLflow registry, normally the proxy above. Passed on to the scorer. |
 | `MODEL_CHECK_ATS_AVM_ROOT` | the `ats_avm` root, two folders above `tools/trident-val` | Monorepo checkout the scorer runs in. |
 | `MODEL_CHECK_EXTRA` | `prototype` | `avm_model` extra the scorer installs. Set `tabpfn` to score the TabPFN challenger. That needs PyTorch, a `tabpfn` extra in the `MODEL_CHECK_ATS_AVM_ROOT` checkout (`dev_elroy` has it), and `TABPFN_TOKEN` in the backend's environment. The first run downloads the weights, so raise `MODEL_CHECK_TIMEOUT_S`. |
-| `MODEL_CHECK_TIMEOUT_S` | `180` | Seconds before a scorer run is killed (with its child processes) and reported as an error. |
+| `MODEL_CHECK_TIMEOUT_S` | `180` | Seconds a request to the champion's scorer process may take before the process is killed (with its child processes) and the slot reports an error. The first request after a start includes loading the model. |
+| `MODEL_CHECK_CHALLENGER_TIMEOUT_S` | `900` | The same for the challenger's process (TabPFN needs about 3 minutes per request plus about a minute to load). The larger of this and `MODEL_CHECK_TIMEOUT_S` applies. |
+| `MODEL_CHECK_BATCH_TIMEOUT_S` | `3600` | The limit for each scorer request of a batch (below). |
+| `MODEL_CHECK_SCORER_MODE` | `persistent` | `oneshot` starts a fresh scorer process for every click, as before (a fallback if the long-lived processes misbehave). |
 | `MODEL_CHECK_PAGES_DIR` | `<explorer>/.cache/pages` | Cache of stored listing pages read from GCS (git-ignored). |
 
 API: `GET /api/v1/model-check/versions` lists registered versions and aliases;
-`POST /api/v1/model-check/score` takes `{"record_id", "champion", "challenger"}`.
+`POST /api/v1/model-check/score` takes `{"record_id", "champion", "challenger"}` (either slot may be `null`: the UI
+scores the champion first and the challenger in a second request); `POST /api/v1/model-check/warm` starts the scorer
+processes and loads the champion in the background (add `"challenger": "challenger"` to load TabPFN as well).
+
+## Model batch
+
+The **Model batch** tab scores every *new* listing of the latest scrape run: a listing is new when its
+`site_listing_ref` appears in that run and in no earlier run. "Latest" is the run with the newest first fetch. You
+start it by hand (**Score the new listings**); nothing runs after a scrape on its own, and the result lives in memory
+on the backend (it survives a page reload, not a backend restart).
+
+- **How it runs.** The champion's process builds the input rows for all listings in one pass (one BigQuery lookup per
+  table, the stored pages fetched 16 at a time), then the champion and the challenger each predict all rows in a
+  single call, in parallel. That is what makes TabPFN affordable: its cost is almost all fixed per call, so about
+  1,200 listings cost about as much as one. Measured on the 2026-11-08 run (1,460 new listings, 1,188 of them
+  for-sale houses, apartments or townhouses): inputs 54 s, champion done at 86 s, challenger about 5 minutes.
+- **What you get.** A table with asking price, champion and challenger estimates (with 90% ranges) and the gap to
+  asking, sorted by the biggest gap first (click a header to sort, a row to open the record inspector); a summary of the
+  median gap by property type and parish; and the listings that were not scored (types the model does not cover,
+  inputs that could not be built), each with its reason. Rows further than 25% from asking are highlighted
+  (`GAP_FLAG_PCT` in `backend/app/model_batch.py`). Gap = (estimate - asking) / asking. A USD listing that is not in
+  the clean table has no JMD rate, so it is scored but has no gap.
+- **Options.** "Include the challenger" can be switched off (champion only takes about a minute); "first N listings"
+  scores a small trial.
+- **Cancel** kills both scorer processes, so the models load again on the next run. While a batch runs, a single-listing
+  click queues behind it on the same process.
+- **API.** `POST /api/v1/model-check/batch` (`{"champion", "challenger", "limit"}`; 409 while one is running),
+  `GET /api/v1/model-check/batch?since=<rows_version>` (progress and slot timings always; the rows, summary and
+  unscored list only when they changed), `POST /api/v1/model-check/batch/cancel`.
 
 ## Data profiles
 
@@ -159,11 +198,15 @@ backend/app/
   main.py            app, login/session, logs, data-profile routes
   listings.py        read-only listings explorer API
   listing_flags.py   bad-parse flags (the only write path)
-  model_check.py     Model estimate API (/api/v1/model-check): registry reads, runs the scorer subprocess
+  model_check.py     Model estimate API (/api/v1/model-check): registry reads (cached), one scorer lane per slot
+  scorer_client.py   ScorerLane: starts, talks to, times out and kills a long-lived scorer process (JSON lines on stdio)
+  model_batch.py     Model batch API (/api/v1/model-check/batch): latest run's new listings, background job, summary
   model_limits.py    input plausibility limits (bedrooms, bathrooms) and the flags shown in the UI
   inference.py       kept from the Ames demo; unused by the app (model_check.py replaces it)
   auth.py db.py models.py logging_config.py
-backend/scorer/      score_listing.py + input_row.py: run under the monorepo env, not this venv (see Model estimate)
+backend/scorer/      serve.py (the long-lived server), score_listing.py (one listing; also the one-shot entry point),
+                     batch.py (bulk input rows, multi-row prediction), input_row.py: run under the monorepo env, not
+                     this venv (see Model estimate)
 backend/tests/       listings and model-check tests, and an NDJSON fixture
 frontend/src/        React + Tailwind views (Listings*, DataProfile, Login)
 scripts/             dev_setup.py, seed_users.py, generate_profile.py

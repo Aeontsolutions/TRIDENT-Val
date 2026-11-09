@@ -57,11 +57,20 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
 - **The model-check adapter is `backend/app/model_check.py`** (router `/api/v1/model-check`; UI in
   `frontend/src/components/ModelEstimate.jsx`). `backend/app/inference.py` is unused: it is the old Ames
   code, nothing imports it, and it must not be wired in.
-- **The scorer must stay in the monorepo environment.** `backend/scorer/score_listing.py` runs as a
-  subprocess via `uv run --package avm_model --extra <MODEL_CHECK_EXTRA, default prototype>` in the `ats_avm`
-  checkout (`tabpfn` for the TabPFN challenger, which needs a `dev_elroy` checkout; see the README), because
-  `avm_model` pins `scikit-learn==1.9.1`. Never import `avm_model`, `mlflow` or `scikit-learn` models into the
-  explorer's venv or into `backend/app/`. Setup, env vars and requirements are in the README (Model estimate).
+- **The scorer must stay in the monorepo environment.** `backend/scorer/serve.py` runs as a long-lived child process
+  (one per slot, "lanes", driven by `backend/app/scorer_client.py`) via
+  `uv run --package avm_model --extra <MODEL_CHECK_EXTRA, default prototype>` in the `ats_avm` checkout (`tabpfn` for
+  the TabPFN challenger, which needs a `dev_elroy` checkout; see the README), because `avm_model` pins
+  `scikit-learn==1.9.1`. Never import `avm_model`, `mlflow` or `scikit-learn` models into the explorer's venv or into
+  `backend/app/`. `backend/scorer/` is the monorepo side: it must not import anything from `backend/app/`. The
+  protocol is one JSON object per line on stdin and stdout (requests `score`, `prepare`, `predict`, `warm`, `ping`,
+  `shutdown`; progress events; one response per request); library chatter goes to stderr, which the client drains.
+  `MODEL_CHECK_SCORER_MODE=oneshot` runs `score_listing.py` once per click instead. Setup, env vars and requirements
+  are in the README (Model estimate).
+- **The batch view is `backend/app/model_batch.py`** (UI `frontend/src/views/ModelBatch.jsx`). The champion lane builds
+  the input rows for the whole batch (`prepare`), then each slot's lane predicts them in one call (`predict`); never
+  predict row by row, because TabPFN's cost is almost all fixed per call (about 3 minutes on a CPU, for 1 or 1,000 rows).
+  One job at a time, kept in memory only.
 - **`backend/scorer/input_row.py` holds copies of the training cleaning rules**
   (`packages/avm_features/src/avm_features/listing_rules.py`, cleaning version `listing-clean-v1`:
   `_title_case`, the parish map, the property-type map). Keep them in step with that file, or listings not
@@ -75,4 +84,10 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
 - The Listings coverage banner (`COVERAGE_NOTE` in `backend/app/listings.py`) says "~540 of ~7,600
   listings", but the table now holds ~9,000 observations. It has not been updated.
 - On Windows, a killed uvicorn can leave its port stuck in LISTEN. Use another port and point Vite at
-  it with `API_URL` rather than fighting it.
+  it with `API_URL` rather than fighting it. Kill the whole tree (`taskkill /PID <pid> /T /F`): the scorer processes
+  are its children, and a hard-killed backend should not leave them holding models in memory (they exit when their
+  stdin closes, but check Task Manager for stray `python` processes after a crash).
+- Scorer processes are killed on a timeout or a batch cancel, and then load their models again (about a minute for the
+  challenger). Nothing is cached across backend restarts except the downloaded model artifacts and stored pages.
+- A USD listing that is not in `listing_clean` has no JMD rate (the rate comes from the clean table), so the batch and
+  the panel score it but show no gap.

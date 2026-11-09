@@ -825,6 +825,44 @@ def run_overview(rows: list[dict]) -> dict:
     }
 
 
+def latest_run_new_listings(rows: list[dict]) -> Optional[dict]:
+    """The latest scrape run and the listings that appear in it and in no other run (None when there are no runs).
+
+    "Latest" is the run with the newest first fetch; a listing is identified as in ``run_overview`` (site_listing_ref,
+    canonical_url as the fallback), and when a run holds a listing twice its most recent observation is used. Rows
+    without a usable key are only counted, since "new" cannot be decided for them.
+    """
+    first_fetch: dict[str, Any] = {}
+    for r in rows:
+        rid = _g(r, "provenance", "scrape_run_id")
+        if not rid:
+            continue
+        f = _g(r, "provenance", "fetched_at")
+        if rid not in first_fetch or (f and (not first_fetch[rid] or str(f) < str(first_fetch[rid]))):
+            first_fetch[rid] = f
+    if not first_fetch:
+        return None
+    latest = max(first_fetch, key=lambda rid: (str(first_fetch[rid] or ""), rid))
+    in_latest: dict[str, dict] = {}
+    elsewhere: set[str] = set()
+    unkeyed = 0
+    for r in rows:
+        rid = _g(r, "provenance", "scrape_run_id")
+        k = _listing_key(r)
+        if rid == latest:
+            if not k:
+                unkeyed += 1
+                continue
+            cur = in_latest.get(k)
+            if cur is None or str(_g(r, "provenance", "fetched_at") or "") >= str(_g(cur, "provenance", "fetched_at") or ""):
+                in_latest[k] = r
+        elif rid and k:
+            elsewhere.add(k)
+    new = [in_latest[k] for k in sorted(in_latest.keys() - elsewhere)]
+    return {"run_id": latest, "first_fetched_at": first_fetch[latest], "earlier_runs": len(first_fetch) - 1,
+            "listings_in_run": len(in_latest), "unkeyed_rows": unkeyed, "new": new}
+
+
 @router.get("/runs")
 def listings_runs():
     """Scrape runs, per-run listing counts and cross-run overlap (is a run diff even meaningful?)."""

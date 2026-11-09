@@ -91,9 +91,11 @@ def env(monkeypatch):
 
     monkeypatch.setattr(model_check, "run_scorer", runner)
     monkeypatch.setattr(model_check, "fetch_registry", registry)
+    model_check.clear_registry_cache()
     state["client"] = TestClient(app)
     yield state
     listings.clear_cache()
+    model_check.clear_registry_cache()
 
 
 def score(env, record_id, **body):
@@ -423,6 +425,7 @@ def real_runner(monkeypatch, tmp_path):
     (tmp_path / "packages" / "avm_model").mkdir(parents=True)
     monkeypatch.setenv("MODEL_CHECK_ATS_AVM_ROOT", str(tmp_path))
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://reg:5000")
+    monkeypatch.setenv("MODEL_CHECK_SCORER_MODE", "oneshot")
     calls = []
 
     def install(completed):

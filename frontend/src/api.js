@@ -47,6 +47,28 @@ async function send(method, path, body, failMessage) {
   return r.json()
 }
 
+// Like `send`, but the thrown error keeps the backend's body (`${status} ${body}`, as `get` does), for the
+// calls whose failure reason the user needs to read (a batch that is already running, a missing registry).
+async function sendWithDetail(method, path, body) {
+  let r
+  try {
+    r = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    logger.error('api', `Network error on ${method} ${path}: ${e.message}`)
+    throw e
+  }
+  if (!r.ok) {
+    if (r.status === 401) onUnauthorized()
+    logger.error('api', `${method} ${path} -> ${r.status}`)
+    throw new Error(`${r.status} ${await r.text()}`)
+  }
+  return r.json()
+}
+
 export const api = {
   login: (username, password) => send('POST', '/auth/login', { username, password }, 'login failed'),
   logout: () => send('POST', '/auth/logout', {}, 'logout failed'),
@@ -70,6 +92,13 @@ export const api = {
   deleteListingFlag: (id) => send('DELETE', `/listings/flags/${id}`, {}, 'deleting the flag failed'),
   modelVersions: () => get('/model-check/versions'),
   scoreListing: (body) => send('POST', '/model-check/score', body, 'scoring failed'),
+  // Starts the scorer processes and loads the champion in the background so the first click is quick.
+  modelWarm: (body = {}) => send('POST', '/model-check/warm', body, 'warm-up failed'),
+  // The latest scrape run's new listings, scored in one batch. `since` is the rows_version already held: the
+  // response then leaves the (large) row list out unless it changed.
+  modelBatch: (since) => get(`/model-check/batch${since != null ? `?since=${since}` : ''}`),
+  modelBatchStart: (body = {}) => sendWithDetail('POST', '/model-check/batch', body),
+  modelBatchCancel: () => sendWithDetail('POST', '/model-check/batch/cancel', {}),
   listingFlagsExportUrl: (params = {}) => `${BASE}/listings/flags/export.csv?${new URLSearchParams(params)}`,
 }
 

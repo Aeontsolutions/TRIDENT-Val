@@ -18,6 +18,7 @@ const SUBTABS = [
   { id: 'listings-distributions', label: 'Distributions' },
   { id: 'listings-map', label: 'Map' },
   { id: 'listings-runs', label: 'Run comparison' },
+  { id: 'listings-model', label: 'Model batch' },
   { id: 'listings-flags', label: 'Flags' },
 ]
 

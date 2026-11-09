@@ -6,6 +6,7 @@ import ListingsDistributions from './views/ListingsDistributions.jsx'
 import ListingsMap from './views/ListingsMap.jsx'
 import ListingsRuns from './views/ListingsRuns.jsx'
 import ListingsFlags from './views/ListingsFlags.jsx'
+import ModelBatch from './views/ModelBatch.jsx'
 import ListingInspector from './views/ListingInspector.jsx'
 import { ListingsShell } from './components/ListingsShell.jsx'
 import Login from './views/Login.jsx'
@@ -25,11 +26,11 @@ function tabsForRole(role) {
 
 const VIEW_IDS = new Set([
   'data-profile', 'listings', 'listings-quality', 'listings-distributions', 'listings-map',
-  'listings-runs', 'listings-flags',
+  'listings-runs', 'listings-model', 'listings-flags',
 ])
 
 const LISTINGS_VIEWS = new Set(['listings-quality', 'listings', 'listings-distributions', 'listings-map',
-  'listings-runs', 'listings-flags'])
+  'listings-runs', 'listings-model', 'listings-flags'])
 
 function stateToPath({ view, pid }) {
   if (view === 'listing' && pid != null) return `/listing/${encodeURIComponent(pid)}`
@@ -148,6 +149,9 @@ export default function App() {
                 )}
                 {view === 'listings-runs' && (
                   <ListingsRuns onOpen={(id) => navigate({ view: 'listing', pid: id })} />
+                )}
+                {view === 'listings-model' && (
+                  <ModelBatch onOpen={(id) => navigate({ view: 'listing', pid: id })} />
                 )}
                 {view === 'listings-flags' && (
                   <ListingsFlags user={user} onOpen={(id) => navigate({ view: 'listing', pid: id })} />

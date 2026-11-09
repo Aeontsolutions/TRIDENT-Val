@@ -83,8 +83,30 @@ function PriceLine({ layout }) {
   )
 }
 
+// m:ss since `since` (ms epoch), ticking once a second.
+export function Elapsed({ since }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const s = Math.max(0, Math.floor((now - since) / 1000))
+  return <span className="figure">{Math.floor(s / 60)}:{String(s % 60).padStart(2, '0')}</span>
+}
+
 function SlotRow({ name, slot, registryError, askingNote }) {
   const label = <td className={`py-1.5 font-medium ${SLOT_STYLE[name].text}`}>{SLOT_LABEL[name]}</td>
+  if (slot.status === 'pending') {
+    return (
+      <tr className="border-t border-line">
+        {label}
+        <td colSpan={3} className="text-xs text-inkmute">
+          Scoring… <Elapsed since={slot.startedAt} /> · the challenger (TabPFN on a CPU) can take about 3 minutes; the
+          champion's result above is already final
+        </td>
+      </tr>
+    )
+  }
   if (slot.status === 'ok') {
     return (
       <tr className="border-t border-line">
@@ -192,22 +214,47 @@ export default function ModelEstimate({ recordId, askingAmount, currency }) {
   const [res, setRes] = useState(null)
   const [err, setErr] = useState(null)
   const current = useRef(recordId)
+  const run = useRef(0) // bumped by every click and listing change, so a late answer to an old request is dropped
 
   useEffect(() => {
     api.modelVersions().then(setReg).catch((e) => setRegErr(errorText(e)))
+    // Start the scorer and load the champion now, so the first click does not wait for it. Best effort.
+    api.modelWarm({ champion: 'champion' }).catch(() => {})
   }, [])
-  useEffect(() => { current.current = recordId; setRes(null); setErr(null); setBusy(false) }, [recordId])
+  useEffect(() => { current.current = recordId; run.current += 1; setRes(null); setErr(null); setBusy(false) }, [recordId])
 
+  // The champion is scored first and shown as soon as it is ready; the challenger (TabPFN: minutes on a CPU) is a
+  // second request, shown as "scoring…" with a timer and filled in when it arrives.
   const score = async () => {
+    const mine = ++run.current
+    const live = () => current.current === recordId && run.current === mine
     setBusy(true); setErr(null); setRes(null)
+    let first
     try {
-      const out = await api.scoreListing({ record_id: recordId, champion: pick.champion, challenger: pick.challenger || null })
-      if (current.current === recordId) setRes(out)
+      first = await api.scoreListing({ record_id: recordId, champion: pick.champion, challenger: null })
     } catch (e) {
-      if (current.current === recordId) setErr(errorText(e))
-    } finally {
-      if (current.current === recordId) setBusy(false)
+      if (live()) { setErr(errorText(e)); setBusy(false) }
+      return
     }
+    if (!live()) return
+    setBusy(false)
+    const wantChallenger = Boolean(pick.challenger) && first.supported !== false && !first.registry_error
+    if (!wantChallenger) { setRes(first); return }
+    const startedAt = Date.now()
+    setRes({ ...first, slots: { ...first.slots, challenger: { status: 'pending', startedAt } } })
+    let second
+    try {
+      second = await api.scoreListing({ record_id: recordId, champion: null, challenger: pick.challenger })
+    } catch (e) {
+      second = { slots: { challenger: { status: 'error', message: errorText(e) } }, warnings: [] }
+    }
+    if (!live()) return
+    setRes((prev) => (prev ? {
+      ...prev,
+      slots: { ...prev.slots, challenger: second.slots?.challenger || { status: 'error', message: 'no result' } },
+      warnings: [...prev.warnings, ...(second.warnings || []).filter((w) => !prev.warnings.some((p) => p.code === w.code))],
+      scored_at: second.scored_at || prev.scored_at,
+    } : prev))
   }
 
   const aliases = reg?.aliases || {}
@@ -244,7 +291,7 @@ export default function ModelEstimate({ recordId, askingAmount, currency }) {
         )}
       </div>
       {regErr && !res?.registry_error && <div className="mt-2 text-xs border border-amber/40 bg-amber/10 rounded-sm p-2">{regErr}</div>}
-      {busy && <Spinner label="Scoring… the first run loads the model and can take a minute" />}
+      {busy && <Spinner label="Scoring the champion… the first click after the backend starts loads the model (about a minute)" />}
       {err && <div className="mt-2 text-sm text-flag">Could not score this listing: {err}</div>}
       {!res && !busy && !err && !regErr && (
         <div className="mt-2 text-xs text-inkmute">Scores this listing with the registered listing-price model. Read only; nothing is written.</div>
