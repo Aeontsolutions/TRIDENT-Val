@@ -163,7 +163,10 @@ on the backend (it survives a page reload, not a backend restart).
   median gap by property type and parish; and the listings that were not scored (types the model does not cover,
   inputs that could not be built), each with its reason. Rows further than 25% from asking are highlighted
   (`GAP_FLAG_PCT` in `backend/app/model_batch.py`). Gap = (estimate - asking) / asking. A USD listing that is not in
-  the clean table has no JMD rate, so it is scored but has no gap.
+  the clean table has no rate of its own, so its asking price is converted at the Bank of Jamaica mid rate
+  (`listings_features.fx_rates_boj`) by the clean table's rule: the last rate on or before the fetch date, at most 5
+  days back. If the table has no such rate (it ended 2026-10-22 when this was written) the listing is scored but has no
+  gap, and the tab says how many rows that is.
 - **Options.** "Include the challenger" can be switched off (champion only takes about a minute); "first N listings"
   scores a small trial.
 - **Cancel** kills both scorer processes, so the models load again on the next run. While a batch runs, a single-listing

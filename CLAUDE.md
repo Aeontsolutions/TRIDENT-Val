@@ -89,5 +89,6 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
   stdin closes, but check Task Manager for stray `python` processes after a crash).
 - Scorer processes are killed on a timeout or a batch cancel, and then load their models again (about a minute for the
   challenger). Nothing is cached across backend restarts except the downloaded model artifacts and stored pages.
-- A USD listing that is not in `listing_clean` has no JMD rate (the rate comes from the clean table), so the batch and
-  the panel score it but show no gap.
+- A USD listing that is not in `listing_clean` gets the Bank of Jamaica rate from `fx_rates_boj` (the clean table's rule,
+  looked up in the scorer, never guessed). With no rate within 5 days before its fetch date (the table ended
+  2026-10-22) the batch and the panel score it but show no gap.
