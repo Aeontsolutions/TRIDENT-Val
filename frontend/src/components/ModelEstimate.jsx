@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { Spinner } from './shared.jsx'
 import { fmtPrice } from './ListingsShell.jsx'
+import ExplainComps from './ExplainComps.jsx'
 
 const SLOTS = ['champion', 'challenger']
 const SLOT_LABEL = { champion: 'Champion', challenger: 'Challenger' }
@@ -127,7 +128,7 @@ function SlotRow({ name, slot, registryError, askingNote }) {
   )
 }
 
-function Result({ res, recordId }) {
+function Result({ res, recordId, model }) {
   const { asking, slots } = res
   const shown = SLOTS.filter((n) => slots?.[n] && slots[n].status !== 'skipped')
   let askingNote = null
@@ -196,6 +197,8 @@ function Result({ res, recordId }) {
           )}
         </div>
       </div>
+
+      {res.slots?.champion?.status === 'ok' && <ExplainComps recordId={recordId} model={model} />}
 
       <div className="text-[11px] text-inkmute">
         Asking-price estimate, JMD.{scoredLine && ` Scored ${scoredLine}.`}
@@ -302,7 +305,7 @@ export default function ModelEstimate({ recordId, askingAmount, currency }) {
           {res.asking.amount != null && <div className="text-xs text-inkmute mt-1">Asking price on the page: <span className="figure">{fmtPrice(res.asking.amount, res.asking.currency)}</span></div>}
         </div>
       )}
-      {res && !unsupported && <Result res={res} recordId={recordId} />}
+      {res && !unsupported && <Result res={res} recordId={recordId} model={pick.champion} />}
     </div>
   )
 }

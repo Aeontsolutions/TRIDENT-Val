@@ -72,6 +72,8 @@ class Deps:
     # before the Jamaica date, at most FX_MAX_GAP_DAYS back): [{"rate": mid, "date": "YYYY-MM-DD"} or None, ...].
     # Used only for a USD listing that is not in listing_clean, which has no rate of its own.
     fx_rates: Callable[[Sequence[Any]], list[dict | None]] | None = None
+    # Drivers and comps for one listing (``explain_listing.make_explain``): (model ref, input row, key) -> dict.
+    explain: Callable[[str, dict, dict], dict] | None = None
 
 
 def _number(value: Any) -> float | None:
@@ -359,6 +361,8 @@ def _real_deps() -> Deps:
             models[ref] = load_model(ref)
         return models[ref]
 
+    from scorer.explain_listing import make_explain
+
     return Deps(
         columns=bundle.input_columns,
         fetch_joined=fetch_joined,
@@ -369,6 +373,7 @@ def _real_deps() -> Deps:
         fetch_joined_many=fetch_joined_many,
         fetch_geo_spatial_many=fetch_geo_spatial_many,
         fx_rates=fx_rates,
+        explain=make_explain(cached_model, bundle.input_columns, bundle.categorical_inputs, _frames),
     )
 
 

@@ -83,6 +83,16 @@ What it shows: the point estimate with its 90% range and the gap to the asking p
 exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as outliers), and warnings.
 
 - **Estimates are asking prices, in JMD.** The model is trained on asking prices, not sale prices.
+- **Drivers and comparable listings.** After scoring, "Explain champion" shows why the model gave its estimate
+  (exact TreeSHAP of the bundle's three tree members, `avm_model.explain`, as percentage effects on the asking price
+  grouped into drivers) and 3-5 comparable listings with an adjustment grid (`avm_model.comps`: rule-based
+  candidates, ranked by ExtraTrees proximity, adjusted to this listing by the model). It runs in the champion's
+  scorer lane (op `explain`): about 10 s, 20-70 s the first time (model load, flat trees, comps pool). Comps need a
+  pool file: in the `ats_avm` checkout run
+  `uv run --package avm_model --extra prototype python scripts/explain/example_report.py --write-pool data/explain/comps_pool.parquet`
+  (needs the git-ignored freeze table, page fields and photo scores; see the script). Comps are other listings'
+  **asking** prices, not sales; there is no time adjustment. The explorer has no photo scores, so v3 runs and is
+  explained without them, and comps' photo scores are left out of the grid.
 - **Not an out-of-sample test.** "Probably in training" means the listing's `listing_clean` row has
   `trainable = true`. The locked test split is not reconstructed, so a trainable listing may have been held
   back in that split and never trained on. A listing that is not marked trainable is in neither the training
@@ -140,6 +150,8 @@ exact inputs fed to the model (bedrooms and bathrooms above 8 are flagged as out
 | `MODEL_CHECK_BATCH_TIMEOUT_S` | `3600` | The limit for each scorer request of a batch (below). |
 | `MODEL_CHECK_SCORER_MODE` | `persistent` | `oneshot` starts a fresh scorer process for every click, as before (a fallback if the long-lived processes misbehave). |
 | `MODEL_CHECK_PAGES_DIR` | `<explorer>/.cache/pages` | Cache of stored listing pages read from GCS (git-ignored). |
+| `MODEL_CHECK_COMPS_POOL` | `<ats_avm root>/data/explain/comps_pool.parquet` | Listings the comps are drawn from (below). |
+| `MODEL_CHECK_EXPLAIN_TIMEOUT_S` | `300` | Limit for one "Explain" request (the first one per scorer process builds the trees and loads the pool). |
 
 API: `GET /api/v1/model-check/versions` lists registered versions and aliases;
 `POST /api/v1/model-check/score` takes `{"record_id", "champion", "challenger"}` (either slot may be `null`: the UI

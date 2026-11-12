@@ -10,7 +10,9 @@ Env: ``MLFLOW_TRACKING_URI`` (default http://localhost:5000), ``MODEL_CHECK_ATS_
 checkout that holds this submodule; must contain ``packages/avm_model``), ``MODEL_CHECK_TIMEOUT_S`` (default 180, per
 request to the champion lane), ``MODEL_CHECK_CHALLENGER_TIMEOUT_S`` (default 900, per request to the challenger lane),
 ``MODEL_CHECK_EXTRA`` (default ``prototype``; ``tabpfn`` also installs TabPFN so the TabPFN challenger can be scored),
-``MODEL_CHECK_SCORER_MODE`` (``persistent``, the default, or ``oneshot``: one process per click, as before).
+``MODEL_CHECK_SCORER_MODE`` (``persistent``, the default, or ``oneshot``: one process per click, as before),
+``MODEL_CHECK_COMPS_POOL`` (default ``<ats_avm root>/data/explain/comps_pool.parquet``: the listings comps are drawn
+from, for ``/explain``), ``MODEL_CHECK_EXPLAIN_TIMEOUT_S`` (default 300).
 """
 import datetime as dt
 import json
@@ -47,6 +49,7 @@ SERVER_PATH = Path(__file__).resolve().parent.parent / "scorer" / "serve.py"  # 
 REGISTRY_TIMEOUT_S = 90  # a scaled-to-zero Cloud Run registry can take over a minute to cold-start
 REGISTRY_TTL_S = 60.0  # how long a successful registry read is reused (every click used to repeat it)
 CHALLENGER_TIMEOUT_S = 900  # TabPFN on a CPU needs about 3 minutes per request once its weights are loaded
+EXPLAIN_TIMEOUT_S = 300  # first call per scorer process builds the flat trees (~10 s) and loads the comps pool
 KILL_DRAIN_TIMEOUT_S = 10  # how long to wait for the pipes to close after the scorer's process tree is killed
 # Set by the venv launcher that started this backend; inherited by `uv run`, they break the scorer's own Python.
 SCORER_ENV_DROP = ("PYTHONHOME", "PYTHONPATH", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")
@@ -248,7 +251,16 @@ def _scorer_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in SCORER_ENV_DROP}
     env["MLFLOW_TRACKING_URI"] = _tracking_uri()
     env.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
+    env.setdefault("MODEL_CHECK_COMPS_POOL", str(_ats_avm_root() / "data" / "explain" / "comps_pool.parquet"))
     return env
+
+
+def _explain_timeout_s() -> float:
+    try:
+        configured = float(os.environ.get("MODEL_CHECK_EXPLAIN_TIMEOUT_S") or EXPLAIN_TIMEOUT_S)
+    except ValueError:
+        configured = float(EXPLAIN_TIMEOUT_S)
+    return max(configured, _timeout_s())
 
 
 def _lane_spec() -> LaneSpec:
@@ -493,6 +505,55 @@ def _scorer_failure_message(exc: BaseException) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _scorer_request(record: dict, item: dict, slots: dict) -> dict:
+    return {
+        "key": {"source_site_id": listings._g(record, "provenance", "source_site_id"),
+                "site_listing_ref": listings._g(record, "provenance", "site_listing_ref")},
+        "raw": item,
+        "snapshot_uri": listings._g(record, "provenance", "snapshot_uri"),
+        "slots": slots,
+    }
+
+
+class ExplainRequest(BaseModel):
+    record_id: str
+    model: str = "champion"  # an alias or a version number
+
+
+@router.post("/explain")
+def explain(body: ExplainRequest):
+    """Why the model gave its estimate (TreeSHAP drivers) and 3-5 comparable listings with model adjustments.
+
+    Runs in the champion's scorer lane (the tree models are small; TabPFN versions have no TreeSHAP and fail with a
+    clear message). Every price is an asking price."""
+    record = _find_record(body.record_id)
+    item = listings._list_item(record)
+    supported, reason = is_supported(item)
+    if not supported:
+        raise HTTPException(400, reason)
+    if _scorer_mode() == "oneshot":
+        raise HTTPException(400, "Drivers and comps need the persistent scorer (unset MODEL_CHECK_SCORER_MODE)")
+    try:
+        found, aliases = registry()
+    except Exception as exc:  # noqa: BLE001 - any registry failure is a 503 with instructions
+        raise HTTPException(503, _registry_down_message(exc))
+    version = _resolve(body.model, found, aliases)
+    if version is None:
+        raise HTTPException(404, f"No model version or alias {body.model!r} is registered")
+    request = _scorer_request(record, item, {})
+    started = time.perf_counter()
+    try:
+        _checked_root()
+        result = lane_for("champion").call("explain", {"request": request, "model": version},
+                                           timeout=_explain_timeout_s())["result"]
+    except ScorerRequestFailed as exc:
+        raise HTTPException(422, f"Could not explain this listing: {exc}")
+    except (ScorerError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        raise HTTPException(502, _scorer_failure_message(exc))
+    return _no_nan({**result, "model_version": version, "elapsed_s": round(time.perf_counter() - started, 1),
+                    "explained_at": _now_iso()})
+
+
 @router.post("/score")
 def score(body: ScoreRequest):
     record = _find_record(body.record_id)
@@ -518,13 +579,7 @@ def score(body: ScoreRequest):
     resolved = {n: None if out["registry_error"] else _resolve(requested[n], versions_found, aliases)
                 for n in SLOT_NAMES}
 
-    request = {
-        "key": {"source_site_id": listings._g(record, "provenance", "source_site_id"),
-                "site_listing_ref": listings._g(record, "provenance", "site_listing_ref")},
-        "raw": item,
-        "snapshot_uri": listings._g(record, "provenance", "snapshot_uri"),
-        "slots": resolved,
-    }
+    request = _scorer_request(record, item, resolved)
     result: dict | None = None
     failure: str | None = None
     try:

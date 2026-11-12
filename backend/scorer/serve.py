@@ -7,7 +7,7 @@ Run under the ats_avm monorepo environment, not the explorer's venv (``avm_model
 The explorer's backend starts it (``backend/app/scorer_client.py``) and talks to it over stdin and stdout, one JSON
 object per line, one request at a time:
 
-    request   {"id": 1, "op": "score" | "prepare" | "predict" | "warm" | "ping" | "shutdown", ...}
+    request   {"id": 1, "op": "score" | "prepare" | "predict" | "warm" | "explain" | "ping" | "shutdown", ...}
     event     {"id": 1, "event": "progress", "stage": "pages", "done": 10, "total": 120}   (zero or more)
     response  {"id": 1, "ok": true, ...}  or  {"id": 1, "ok": false, "fatal": "ValueError: ..."}
 
@@ -27,7 +27,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from scorer import batch  # noqa: E402
-from scorer.score_listing import Deps, _json_default, _real_deps, run  # noqa: E402
+from scorer.score_listing import Deps, _json_default, _real_deps, build_row, run  # noqa: E402
 
 
 def dumps(message: dict) -> str:
@@ -58,7 +58,17 @@ def _op_warm(msg: dict, deps: Deps, progress: batch.Progress) -> dict:
     return {"loaded": loaded}
 
 
-OPS = {"score": _op_score, "prepare": _op_prepare, "predict": _op_predict, "warm": _op_warm}
+def _op_explain(msg: dict, deps: Deps, progress: batch.Progress) -> dict:
+    """Drivers and comps of one listing for one model: ``{"request": <score request>, "model": <version>}``."""
+    if deps.explain is None:
+        raise ValueError("this scorer has no explain support")
+    request = msg["request"]
+    built = build_row(request, deps)
+    result = deps.explain(str(msg["model"]), built["inputs"], request.get("key") or {})
+    return {"result": {**result, "input_source": built["input_source"], "page_error": built["page_error"]}}
+
+
+OPS = {"score": _op_score, "prepare": _op_prepare, "predict": _op_predict, "warm": _op_warm, "explain": _op_explain}
 
 
 def serve_loop(lines: Iterable[str], write: Callable[[dict], None], deps_factory: Callable[[], Deps]) -> None:

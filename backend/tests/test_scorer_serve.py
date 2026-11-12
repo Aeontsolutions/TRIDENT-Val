@@ -25,6 +25,7 @@ class Counter:
         self.joined = 0
         self.factory = 0
         self.loaded = []
+        self.explained = []
 
 
 def make_factory(counter, fail_first=False, joined_exc=None, bad_ref=None):
@@ -45,9 +46,13 @@ def make_factory(counter, fail_first=False, joined_exc=None, bad_ref=None):
                 raise KeyError("no such version")
             return EchoModel()
 
+        def explain(ref, inputs, key):
+            counter.explained.append((ref, inputs, key))
+            return {"drivers": [{"group": "Bedrooms", "pct_effect": 0.1}], "comps": {"available": False}}
+
         return Deps(columns=lambda: list(COLUMNS), fetch_joined=fetch_joined,
                     fetch_geo_spatial=lambda s, r: (None, None), fetch_page_fields=lambda uri: {},
-                    load_model=load_model, categorical=lambda: ["property_type"])
+                    load_model=load_model, categorical=lambda: ["property_type"], explain=explain)
 
     return factory
 
@@ -154,3 +159,14 @@ def test_responses_are_json_safe_for_decimals_and_numpy():
 
     line = serve.dumps({"a": Decimal("1.5"), "b": np.float64(2.5), "c": pd.Timestamp("2026-11-01")})
     assert json.loads(line) == {"a": 1.5, "b": 2.5, "c": "2026-11-01 00:00:00"}
+
+
+def test_explain_builds_the_row_and_passes_it_with_the_key():
+    counter = Counter()
+    req = score_request(1, slots={})
+    out = serve_all([{"id": 1, "op": "explain", "request": req["request"], "model": "3"}], make_factory(counter))
+    msg = final(out, 1)
+    assert msg["ok"] is True and msg["result"]["drivers"][0]["group"] == "Bedrooms"
+    assert msg["result"]["input_source"] == "raw_fallback"
+    (ref, inputs, key), = counter.explained
+    assert ref == "3" and inputs["bedrooms"] == 3 and key == KEY

@@ -32,6 +32,12 @@ class FakeLane:
             raise self.outcome
         if op == "warm":
             return {"ok": True, "loaded": {}}
+        if op == "explain":
+            return {"ok": True, "result": {"point_model": "stage3", "base_jmd": 4e7, "pred_jmd": 5e7, "check_gap": 0.0,
+                                           "drivers": [{"group": "Floor area", "pct_effect": 0.25}],
+                                           "comps": {"available": False, "message": "No comps pool"},
+                                           "seconds": {"drivers": 1.0}, "input_source": "raw_fallback",
+                                           "page_error": None}}
         (name, ref), = payload["request"]["slots"].items() or [(None, None)]
         result = {"input_source": "raw_fallback", "clean": None, "inputs": {"bedrooms": 3.0, "latitude": 18.0,
                   "longitude": -77.0}, "page_error": None,
@@ -213,3 +219,39 @@ def test_warm_without_a_registry_does_nothing(client, lanes, monkeypatch):
     model_check.clear_registry_cache()
     assert client.post("/api/v1/model-check/warm", json={}).status_code == 202
     assert lanes["champion"].calls == []
+
+# ---------- drivers and comps ----------
+
+
+def test_explain_runs_in_the_champion_lane_with_the_resolved_version(client, lanes):
+    resp = client.post("/api/v1/model-check/explain", json={"record_id": "rec_apt", "model": "challenger"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["model_version"] == "2" and body["drivers"][0]["group"] == "Floor area"
+    assert body["comps"]["available"] is False
+    (op, payload, timeout), = lanes["champion"].calls
+    assert op == "explain" and payload["model"] == "2" and payload["request"]["slots"] == {}
+    assert payload["request"]["key"]["site_listing_ref"]
+    assert timeout == 300 and lanes["challenger"].calls == []
+
+
+def test_explain_refuses_unsupported_listings_unknown_models_and_oneshot_mode(client, lanes, monkeypatch):
+    assert client.post("/api/v1/model-check/explain", json={"record_id": "rec_land"}).status_code == 400
+    assert client.post("/api/v1/model-check/explain", json={"record_id": "rec_apt", "model": "7"}).status_code == 404
+    monkeypatch.setenv("MODEL_CHECK_SCORER_MODE", "oneshot")
+    assert client.post("/api/v1/model-check/explain", json={"record_id": "rec_apt"}).status_code == 400
+    assert lanes["champion"].calls == []
+
+
+def test_explain_reports_a_scorer_failure(client, lanes):
+    lanes["champion"].outcome = ScorerRequestFailed("ValueError: TreeSHAP needs tree members")
+    resp = client.post("/api/v1/model-check/explain", json={"record_id": "rec_apt"})
+    assert resp.status_code == 422 and "TreeSHAP needs tree members" in resp.json()["detail"]
+    lanes["champion"].outcome = subprocess.TimeoutExpired(cmd="x", timeout=300)
+    assert client.post("/api/v1/model-check/explain", json={"record_id": "rec_apt"}).status_code == 502
+
+
+def test_the_scorer_gets_the_default_comps_pool_path(lanes, monkeypatch, tmp_path):
+    monkeypatch.delenv("MODEL_CHECK_COMPS_POOL", raising=False)
+    env = model_check._scorer_env()
+    assert env["MODEL_CHECK_COMPS_POOL"] == str(tmp_path / "data" / "explain" / "comps_pool.parquet")

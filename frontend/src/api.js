@@ -92,6 +92,8 @@ export const api = {
   deleteListingFlag: (id) => send('DELETE', `/listings/flags/${id}`, {}, 'deleting the flag failed'),
   modelVersions: () => get('/model-check/versions'),
   scoreListing: (body) => send('POST', '/model-check/score', body, 'scoring failed'),
+  // TreeSHAP drivers and comparable listings for one listing and model (about 10 s; the first call ~30 s).
+  explainListing: (body) => send('POST', '/model-check/explain', body, 'explaining failed'),
   // Starts the scorer processes and loads the champion in the background so the first click is quick.
   modelWarm: (body = {}) => send('POST', '/model-check/warm', body, 'warm-up failed'),
   // The latest scrape run's new listings, scored in one batch. `since` is the rows_version already held: the

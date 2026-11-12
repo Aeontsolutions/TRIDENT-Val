@@ -63,7 +63,7 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
   the TabPFN challenger, which needs a `dev_elroy` checkout; see the README), because `avm_model` pins
   `scikit-learn==1.9.1`. Never import `avm_model`, `mlflow` or `scikit-learn` models into the explorer's venv or into
   `backend/app/`. `backend/scorer/` is the monorepo side: it must not import anything from `backend/app/`. The
-  protocol is one JSON object per line on stdin and stdout (requests `score`, `prepare`, `predict`, `warm`, `ping`,
+  protocol is one JSON object per line on stdin and stdout (requests `score`, `prepare`, `predict`, `warm`, `explain`, `ping`,
   `shutdown`; progress events; one response per request); library chatter goes to stderr, which the client drains.
   `MODEL_CHECK_SCORER_MODE=oneshot` runs `score_listing.py` once per click instead. Setup, env vars and requirements
   are in the README (Model estimate).
