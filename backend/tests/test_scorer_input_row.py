@@ -97,3 +97,10 @@ def test_property_type_only_house_apartment_townhouse():
     assert _raw_row(property_type_raw="Residential Lot")["property_type"] is None
     assert _raw_row(property_type_raw="Hotel")["property_type"] is None
     assert _raw_row(property_type_raw=None)["property_type"] is None
+
+
+def test_private_treaty_prefix_is_removed_from_community_like_training():
+    assert _raw_row(community="By Private Treaty Whitehall")["community"] == "Whitehall"
+    assert _raw_row(community="  by private treaty  ST. ANN'S BAY")["community"] == "St. Ann's Bay"
+    assert _raw_row(community="By Private Treaty")["community"] is None
+    assert _raw_row(community="Treaty Hill")["community"] == "Treaty Hill"

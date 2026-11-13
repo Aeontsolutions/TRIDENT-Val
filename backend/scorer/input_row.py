@@ -4,6 +4,7 @@ Plain dict code: no pandas and no ``avm_model`` import. The model's column list 
 passed in as ``columns``.
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -46,8 +47,8 @@ def _float_or_none(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
-# Copied from packages/avm_features/src/avm_features/listing_rules.py (cleaning_version listing-clean-v1):
-# PROPERTY_TYPE_MAP, CANONICAL_PARISHES, _text, _parish_key and _title_case. They must be kept in step with it,
+# Copied from packages/avm_features/src/avm_features/listing_rules.py (cleaning_version listing-clean-v2):
+# PROPERTY_TYPE_MAP, CANONICAL_PARISHES, _text, _parish_key, _title_case and the "By Private Treaty" community rule. They must be kept in step with it,
 # because this module is tested without avm_features and the row has to be built the way training builds it.
 PROPERTY_TYPE_MAP = {
     "House": "house",
@@ -95,6 +96,17 @@ def _title_case(value: Any) -> str | None:
     return None if text is None else " ".join(w[:1].upper() + w[1:].lower() for w in text.split(" "))
 
 
+_PRIVATE_TREATY_RE = re.compile(r"^\s*by\s+private\s+treaty\b\s*", re.IGNORECASE)
+
+
+def _community(value: Any) -> str | None:
+    """The community as listing_clean has it: a leading "By Private Treaty" removed, then title-cased."""
+    text = _text(value)
+    if text is None:
+        return None
+    return _title_case(_PRIVATE_TREATY_RE.sub("", text, count=1))
+
+
 def _raw_base(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Raw listing keys mapped onto listing_clean column names and units."""
     unit = _clean(raw.get("floor_area_unit"))
@@ -105,7 +117,7 @@ def _raw_base(raw: Mapping[str, Any]) -> dict[str, Any]:
         "bathrooms": _clean(raw.get("bathrooms")),
         "floor_area_sqft": _float_or_none(raw.get("floor_area")) if sqft else None,
         "parish": _PARISH_BY_KEY.get(_parish_key(raw.get("parish_raw"))),
-        "community": _title_case(raw.get("community")),
+        "community": _community(raw.get("community")),
         "latitude": _clean(raw.get("latitude")),
         "longitude": _clean(raw.get("longitude")),
     }

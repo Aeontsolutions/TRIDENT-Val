@@ -72,8 +72,8 @@ On macOS/Linux use `.venv/bin/python`. Demo logins are in the README (local use 
   predict row by row, because TabPFN's cost is almost all fixed per call (about 3 minutes on a CPU, for 1 or 1,000 rows).
   One job at a time, kept in memory only.
 - **`backend/scorer/input_row.py` holds copies of the training cleaning rules**
-  (`packages/avm_features/src/avm_features/listing_rules.py`, cleaning version `listing-clean-v1`:
-  `_title_case`, the parish map, the property-type map). Keep them in step with that file, or listings not
+  (`packages/avm_features/src/avm_features/listing_rules.py`, cleaning version `listing-clean-v2`:
+  `_title_case` and the leading "By Private Treaty" removed from the community, the parish map, the property-type map). Keep them in step with that file, or listings not
   in `listing_clean` get inputs the model never saw in training.
 - **Data profiles** are written by `scripts/generate_profile.py` to `reports/data_profile/` and shown
   in the Admin-only Data Profile tab. They are static snapshots. See the README for usage.
